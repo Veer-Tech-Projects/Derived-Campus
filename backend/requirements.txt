@@ -1,0 +1,26 @@
+# Core Framework
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+pydantic==2.6.1
+pydantic-settings==2.1.0
+
+# Database (Async)
+sqlalchemy==2.0.27
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# Task Queue
+celery==5.3.6
+redis==5.0.1
+
+# HTTP Client
+httpx==0.26.0
+requests==2.31.0
+beautifulsoup4==4.12.3
+
+# Utilities
+python-multipart==0.0.9
+tenacity==8.2.3
+
+pdfplumber==0.10.3
