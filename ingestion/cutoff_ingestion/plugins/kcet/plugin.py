@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional, Any
 import unicodedata
+import re
 from ingestion.cutoff_ingestion.core.base_plugin import BaseCutoffPlugin
 from ingestion.cutoff_ingestion.plugins.kcet.round_normalizer import RoundNormalizer
 from ingestion.cutoff_ingestion.plugins.kcet.adapter import KCETContextAdapter
@@ -32,14 +33,11 @@ class KCETPlugin(BaseCutoffPlugin):
 
     def get_notification_filters(self) -> Dict[str, List[str]]:
         return {
-            "positive": [
-                "CUTOFF", "CUT-OFF", "ಕಟ್ ಆಫ್", "ಕಟ್ಆಫ್", "ಕಟ್‌ಆಫ್"
-            ],
+            "positive": ["CUTOFF", "CUT-OFF", "ಕಟ್ ಆಫ್", "ಕಟ್ಆಫ್", "ಕಟ್‌ಆಫ್"],
             "negative": [
                 "ALLOTMENT", "RESULT", "SCHEDULE", "FEE", "MATRIX", "KEY", 
                 "PRESS", "VERIFICATION", "CHALLAN", "NOTE", "PAYMENT", 
                 "DATE EXTENSION", "INSTRUCTION", "SUMMARY", "PROCEDURE",
-                # MANDATORY KANNADA NEGATIVES
                 "ಪರಿಶೀಲನಾ", "ದಿನಾಂಕ", "ಶುಲ್ಕ", "ಅರ್ಜಿ", "ಮಾಹಿತಿ",
                 "ವೇಳಾಪಟ್ಟಿ", "ಆಯ್ಕೆ", "ಎಂಟ್ರಿ", "ಸಕ್ರಿಯ", "ಪ್ರವೇಶ", "ವಿಸ್ತರಣೆ",
                 "ಪಾವತಿ", "ಆದೇಶ", "ಅಧಿಸೂಚನೆ", "ತಾತ್ಕಾಲಿಕ", "ಅಡ್ಮಿಷನ್", "ಪ್ರಕಟಣೆ", 
@@ -55,6 +53,7 @@ class KCETPlugin(BaseCutoffPlugin):
     def normalize_round(self, text: str) -> Optional[int]:
         return RoundNormalizer.normalize(text)
 
+    # --- THE CRITICAL LOGIC (RESTORED FULLY) ---
     def normalize_artifact_name(self, text: str) -> tuple[str, str, bool]:
         """
         Enterprise-grade standardization using pure Python logic (No Regex).
@@ -232,8 +231,52 @@ class KCETPlugin(BaseCutoffPlugin):
         
         return " ".join(deduped), text.strip(), is_standardized
 
+    # --- FACTORY METHODS ---
     def get_adapter(self) -> Any:
         return KCETContextAdapter()
 
     def get_parser(self, pdf_path: str) -> Any:
         return KCETTableParser(pdf_path)
+
+    # --- MOVED LOGIC (FROM PROCESS_ARTIFACTS) ---
+    def sanitize_round_name(self, raw_name: str) -> str:
+        if not raw_name: return "UNKNOWN"
+        name = raw_name.upper()
+        
+        patterns_to_remove = [
+            r"\(HK\)", r"\bHK\b",
+            r"\(AGRICULTURIST QUOTA\)", r"\bAGRICULTURIST QUOTA\b",
+            r"\(PRIVATE\)", r"\bPRIVATE\b",
+            r"\(NRI\)", r"\bNRI\b",
+            r"\(SPECIAL\)", r"\bSPECIAL\b"
+        ]
+        
+        for pattern in patterns_to_remove:
+            name = re.sub(pattern, "", name)
+
+        name = name.replace("&", "_").replace("-", "_")
+        name = name.replace("(", "").replace(")", "")
+        name = re.sub(r"[\s_]+", "_", name)
+        
+        return name.strip("_")
+
+    def transform_row_to_context(self, row: Dict[str, Any], artifact: Any, sanitized_stream: str) -> Dict[str, Any]:
+        """
+        KCET Specific: Maps Parser output -> Context Input.
+        """
+        loc_norm = "GEN" if row['seat_type'] == "GENERAL" else "HK"
+        if row['seat_type'] == "PRIVATE": loc_norm = "PVT"
+
+        return {
+            "college_name_raw": row['college_name_raw'],
+            "source_type": "kcet_pdf",
+            "course_type_normalized": sanitized_stream,
+            "location_type_normalized": loc_norm,
+            "category_raw": row['category_raw'],
+            "year": artifact.year,
+            "round": artifact.round_number,
+            "kea_code": row['kea_code'],
+            "course_code_raw": row['course_code_raw'],
+            "course_name_raw": row['course_name_raw'],
+            "source_artifact_id": str(artifact.id)
+        }

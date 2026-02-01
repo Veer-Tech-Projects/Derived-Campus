@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from sqlalchemy import text
-from app.database import engine
+from app.database import async_engine as engine
 from app.config import settings
 
 app = FastAPI(title=settings.PROJECT_NAME)

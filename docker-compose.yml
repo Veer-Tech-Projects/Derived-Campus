@@ -91,16 +91,33 @@ services:
       - postgres
 
   flower:
-    image: mher/flower
+    # CHANGE 1: Build from your code instead of pulling the generic image
+    build: 
+      context: ./backend
     container_name: derived_flower
+    
+    # CHANGE 2: Keep the specific command (Now it works because the code is there!)
     command: celery -A app.worker.celery_app flower --port=5555 --basic_auth=${FLOWER_USER}:${FLOWER_PASSWORD}
+    
     ports:
       - "5555:5555"
     environment:
       - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
+      # Add DB creds just in case your worker imports them at startup
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    volumes:
+      - ./backend:/app  # <--- CRITICAL: Mounts your code
     depends_on:
       - redis
+      - backend
 
 volumes:
   postgres_sot_data:

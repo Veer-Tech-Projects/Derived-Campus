@@ -201,4 +201,4 @@ class KCETTableParser:
         try: 
             return float(val) > 0
         except ValueError: 
-            return False
+            return False 

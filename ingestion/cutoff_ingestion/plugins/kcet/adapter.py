@@ -75,7 +75,8 @@ class KCETContextAdapter(ContextAdapter):
             kea_college_code=row['kea_code'],
             kea_college_name_raw=row['college_name_raw'],
             course_type=row['course_type_normalized'], 
-            year=row['year']
+            year=row['year'],
+            source_artifact_id=row['source_artifact_id']
         ).on_conflict_do_update(
             constraint='uq_kcet_metadata_identity',
             set_={"kea_college_name_raw": row['college_name_raw']}

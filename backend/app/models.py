@@ -99,6 +99,7 @@ class KCETCollegeMetadata(Base):
     kea_college_name_raw = Column(Text, nullable=False) 
     course_type = Column(String(32), nullable=False)    
     year = Column(Integer, nullable=False)
+    source_artifact_id = Column(UUID(as_uuid=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint('college_id', 'course_type', 'year', name='uq_kcet_metadata_identity'),
@@ -263,6 +264,8 @@ class DiscoveredArtifact(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), index=True)
     
     raw_metadata = Column(JSONB, server_default=text("'{}'::jsonb"), nullable=False)
+
+    requires_reprocessing = Column(Boolean, default=False)
 
     __table_args__ = (
         UniqueConstraint('pdf_path', 'notification_url', name='uq_discovered_pdf'),
