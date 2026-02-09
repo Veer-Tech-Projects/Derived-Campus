@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Boolean, Numeric, DateTime, Text, Index, UniqueConstraint, BigInteger, ForeignKey
+    Column, Integer, String, Boolean, Numeric, DateTime, Text, Index, UniqueConstraint, BigInteger, ForeignKey, CheckConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.sql import func, text
@@ -269,4 +269,81 @@ class DiscoveredArtifact(Base):
 
     __table_args__ = (
         UniqueConstraint('pdf_path', 'notification_url', name='uq_discovered_pdf'),
+    )
+
+
+# --- PHASE 8: CONTROL PLANE GOVERNANCE (STRICT ENTERPRISE) ---
+
+class ExamConfiguration(Base):
+    """
+    Global Master Switch.
+    """
+    __tablename__ = "exam_configuration"
+
+    exam_code = Column(String(32), primary_key=True)
+    is_active = Column(Boolean, server_default="true", nullable=False)
+    ingestion_mode = Column(String(32), server_default="CONTINUOUS", nullable=False)
+    config_overrides = Column(JSONB, server_default=text("'{}'::jsonb"), nullable=False)
+    
+    # Audit: Creation vs Mutation
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        # [NEW FIX] Strict Mode Enforcement
+        CheckConstraint(
+            "ingestion_mode IN ('BOOTSTRAP', 'CONTINUOUS')",
+            name="ck_exam_ingestion_mode"
+        ),
+    )
+
+
+class IngestionRun(Base):
+    """
+    The Flight Recorder.
+    """
+    __tablename__ = "ingestion_runs"
+
+    run_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    artifact_id = Column(UUID(as_uuid=True), ForeignKey("discovered_artifacts.id"), nullable=False)
+    
+    # Denormalized for fast filtering
+    exam_code = Column(String(32), nullable=False)
+    
+    status = Column(String(32), nullable=False) 
+    stats = Column(JSONB, server_default=text("'{}'::jsonb"), nullable=False)
+    
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    artifact = relationship("DiscoveredArtifact")
+
+    __table_args__ = (
+        # Strict Status Enforcement
+        CheckConstraint(
+            "status IN ('RUNNING', 'COMPLETED', 'FAILED')",
+            name="ck_ingestion_runs_status"
+        ),
+        Index('idx_runs_exam', 'exam_code'),
+    )
+
+
+class RegistryAuditLog(Base):
+    """
+    Compliance Log.
+    """
+    __tablename__ = "registry_audit_log"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    entity_type = Column(String(32), nullable=False) 
+    entity_id = Column(UUID(as_uuid=True), nullable=False) 
+    action = Column(String(64), nullable=False) 
+    performed_by = Column(String(128), nullable=False) 
+    reason = Column(Text, nullable=True)
+    
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        # Time-based query optimization
+        Index('idx_audit_timestamp', 'timestamp'),
     )

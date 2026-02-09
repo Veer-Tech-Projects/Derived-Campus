@@ -15,8 +15,8 @@ from app.models import College, CollegeAlias
 logger = logging.getLogger("RegistryAuthority")
 
 class RegistryMode(Enum):
-    BOOTSTRAP = "bootstrap"       
-    CONTINUOUS = "continuous"     
+    BOOTSTRAP = "BOOTSTRAP"       
+    CONTINUOUS = "CONTINUOUS"     
 
 @dataclass
 class ResolutionResult:
@@ -28,9 +28,6 @@ class ResolutionResult:
 class RegistryService:
     """
     The Identity Authority.
-    ENTERPRISE POLICY: 
-    1. Ingestion is Read-Only: We never auto-create colleges during scanning.
-    2. Zero-Trust: Unknown entities are always quarantined.
     """
 
     @staticmethod
@@ -53,10 +50,6 @@ class RegistryService:
              logger.warning(f"[Run: {ingestion_run_id}] Identity Resolution Failed: Empty Name")
              return ResolutionResult(None, "QUARANTINED", 0.0, "Empty/Invalid Name")
 
-        # Step 1: Exact Alias Lookup (Read-only)
-        # REJECTED AUDIT FIX: We do NOT scope by source_type. 
-        # Rationale: "RVCE" is "RVCE" regardless of whether it came from KCET or COMEDK.
-        # Aliases are Global Identifiers.
         existing_alias = db.execute(
             select(CollegeAlias).where(
                 and_(
@@ -67,7 +60,6 @@ class RegistryService:
         ).scalar_one_or_none()
 
         if existing_alias:
-            # logger.info(f"Identity MATCH: {raw_name} -> {existing_alias.college_id}")
             return ResolutionResult(
                 college_id=existing_alias.college_id,
                 outcome="MATCHED",
@@ -75,20 +67,19 @@ class RegistryService:
                 reason=f"Alias Match: {normalized}"
             )
 
-        # Step 2: STRICT QUARANTINE (No Auto-Creation)
         logger.info(f"[Run: {ingestion_run_id}] Identity QUARANTINED: {raw_name} (Norm: {normalized})")
-        return ResolutionResult(
-            None, 
-            "QUARANTINED", 
-            0.0, 
-            f"Unknown identity: {raw_name}"
-        )
+        return ResolutionResult(None, "QUARANTINED", 0.0, f"Unknown identity: {raw_name}")
 
 
-    # --- ADMIN ACTIONS (For Phase 8) ---
+    # --- ADMIN ACTIONS ---
+    # UPDATED: Removed state_code argument
     def promote_candidate(self, db: Session, raw_name: str, normalized: str, source_type: str) -> uuid.UUID:
         college_stmt = insert(College).values(
-            canonical_name=raw_name, normalized_name=normalized, country_code="IN", status="active"
+            canonical_name=raw_name, 
+            normalized_name=normalized, 
+            country_code="IN", 
+            # state_code is REMOVED (defaults to NULL in DB)
+            status="active"
         ).on_conflict_do_nothing(index_elements=['normalized_name']).returning(College.college_id)
         
         result_id = db.execute(college_stmt).scalar()

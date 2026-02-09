@@ -1,5 +1,6 @@
 {
   "python.analysis.extraPaths": [
-    "./backend"
+    "./backend",
+    "./backend/app/domains/admin_portal"
   ]
 }

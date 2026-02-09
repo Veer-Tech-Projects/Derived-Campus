@@ -3,15 +3,18 @@ import uuid
 import logging
 import requests
 import shutil
-from sqlalchemy import select, update, insert, delete
+from sqlalchemy import select, update, insert, delete, or_, and_, tuple_
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
+import traceback
 
 from app.database import SessionLocal
 from app.models import (
     DiscoveredArtifact, CutoffOutcome, SeatPolicyQuarantine, 
-    CollegeCandidate #, ExamConfiguration
+    CollegeCandidate, ExamConfiguration, IngestionRun
 )
 from app.services.registry_service import RegistryService, RegistryMode
+from app.domains.admin_portal.services.janitor_service import JanitorService
 from ingestion.common.services.context_manager import ContextManager, PolicyViolationError
 from ingestion.common.services.plugin_factory import PluginFactory 
 
@@ -30,61 +33,57 @@ class ArtifactProcessor:
 
     def process_approved_artifacts(self, specific_exam: str = None):
         """
-        Fetches APPROVED artifacts. Optionally filters by exam code.
+        Fetches APPROVED artifacts OR those marked for reprocessing.
         """
-        query = select(DiscoveredArtifact).where(DiscoveredArtifact.status == 'APPROVED')
+        query = select(DiscoveredArtifact).where(
+            or_(
+                DiscoveredArtifact.status == 'APPROVED',
+                DiscoveredArtifact.requires_reprocessing == True
+            )
+        )
         
         if specific_exam:
             query = query.where(DiscoveredArtifact.exam_code == specific_exam)
             
         artifacts = self.db.execute(query.order_by(DiscoveredArtifact.created_at.asc())).scalars().all()
 
-        logger.info(f"Found {len(artifacts)} APPROVED artifacts.")
+        logger.info(f"Found {len(artifacts)} artifacts to process.")
         for artifact in artifacts:
             self._process_single_artifact(artifact)
 
     def _get_ingestion_mode(self, exam_code: str) -> RegistryMode:
-        """
-        Dynamically fetches mode (BOOTSTRAP/CONTINUOUS) from DB.
-        Defaults to BOOTSTRAP if config is missing.
-        """
         try:
             config = self.db.execute(
                 select(ExamConfiguration).where(ExamConfiguration.exam_code == exam_code)
             ).scalar_one_or_none()
 
             if not config or not config.ingestion_mode:
-                return RegistryMode.BOOTSTRAP
+                logger.warning(f"No config for {exam_code}. Defaulting to CONTINUOUS.")
+                return RegistryMode.CONTINUOUS 
             
             return RegistryMode(config.ingestion_mode)
         except Exception:
-            logger.warning(f"Config check failed for {exam_code}. Defaulting to BOOTSTRAP.")
-            return RegistryMode.BOOTSTRAP
-
-    def _smart_wipe(self, artifact: DiscoveredArtifact, mode: RegistryMode):
-        """
-        Pre-Clean Logic:
-        - BOOTSTRAP: Hard delete previous attempts for this file.
-        - CONTINUOUS: Soft delete (retire) previous rows.
-        """
-        if mode == RegistryMode.BOOTSTRAP:
-            logger.info(f"Performing BOOTSTRAP Hard Delete for Artifact {artifact.id}")
-            self.db.execute(
-                delete(CutoffOutcome).where(CutoffOutcome.source_document == str(artifact.id))
-            )
-        else:
-            logger.info(f"Performing CONTINUOUS Soft Delete for Artifact {artifact.id}")
-            self.db.execute(
-                update(CutoffOutcome)
-                .where(CutoffOutcome.source_document == str(artifact.id))
-                .values(is_latest=False)
-            )
-        self.db.commit()
+            return RegistryMode.CONTINUOUS
 
     def _process_single_artifact(self, artifact: DiscoveredArtifact):
         ingestion_run_id = uuid.uuid4()
         local_path = None
         
+        try:
+            self.db.execute(
+                insert(IngestionRun).values(
+                    run_id=ingestion_run_id,
+                    artifact_id=artifact.id,
+                    exam_code=artifact.exam_code,
+                    status="RUNNING",
+                    stats={}
+                )
+            )
+            self.db.commit()
+        except Exception as e:
+            logger.error(f"Failed to initialize IngestionRun: {e}")
+            return
+
         try:
             # 1. LOAD PLUGIN & CONFIG
             plugin = PluginFactory.get_plugin(artifact.exam_code)
@@ -92,8 +91,28 @@ class ArtifactProcessor:
             
             logger.info(f"Starting Run {ingestion_run_id} | Exam: {artifact.exam_code} | Mode: {mode}")
 
-            # 2. SMART WIPE
-            self._smart_wipe(artifact, mode)
+            # 2. CONDITIONAL WIPING
+            if mode == RegistryMode.BOOTSTRAP:
+                logger.warning(f"🧹 BOOTSTRAP MODE: Wiping data for artifact {artifact.id}")
+                JanitorService.wipe_artifact(self.db, artifact.id, artifact.exam_code)
+            else:
+                # [REFINED] CONTINUOUS MODE VERSIONING PREP
+                logger.info(f"📎 CONTINUOUS MODE: Preparing versioning for {artifact.id}")
+                
+                # 1. Clear previous attempts by THIS SPECIFIC ARTIFACT ONLY.
+                # This ensures idempotency if you re-run the same file multiple times.
+                self.db.execute(delete(CutoffOutcome).where(
+                    CutoffOutcome.source_document == str(artifact.id)
+                ))
+
+                self.db.execute(delete(SeatPolicyQuarantine).where(
+                    SeatPolicyQuarantine.source_file == str(artifact.id)
+                ))
+                
+                self.db.execute(delete(CollegeCandidate).where(
+                    CollegeCandidate.source_document == str(artifact.id)
+                ))
+                self.db.flush()
 
             # 3. DOWNLOAD & PREPARE
             local_path = self._download_file(artifact.pdf_path, artifact.id)
@@ -111,20 +130,12 @@ class ArtifactProcessor:
             # 5. PARSING LOOP
             for row in parser.parse():
                 self._handle_row(
-                    row=row, 
-                    artifact=artifact, 
-                    run_id=ingestion_run_id, 
-                    stats=stats, 
-                    stream=sanitized_stream, 
-                    mode=mode, 
-                    outcome_buf=outcome_buf, 
-                    quarantine_buf=quarantine_buf, 
-                    identity_buf=identity_buf,
-                    adapter=adapter, 
-                    plugin=plugin
+                    row=row, artifact=artifact, run_id=ingestion_run_id, 
+                    stats=stats, stream=sanitized_stream, mode=mode, 
+                    outcome_buf=outcome_buf, quarantine_buf=quarantine_buf, 
+                    identity_buf=identity_buf, adapter=adapter, plugin=plugin
                 )
                 
-                # Flush logic
                 if len(outcome_buf) >= self.BATCH_SIZE: self._flush_outcomes(outcome_buf)
                 if len(quarantine_buf) >= self.BATCH_SIZE: self._flush_quarantine(quarantine_buf)
                 if len(identity_buf) >= self.BATCH_SIZE: self._flush_identity(identity_buf) 
@@ -140,34 +151,53 @@ class ArtifactProcessor:
                 .values(
                     status="INGESTED", 
                     review_notes=f"Run {ingestion_run_id}: {stats}",
-                    requires_reprocessing=False  # Clear dirty flag
+                    requires_reprocessing=False
                 )
+            )
+            
+            self.db.execute(
+                update(IngestionRun)
+                .where(IngestionRun.run_id == ingestion_run_id)
+                .values(status="COMPLETED", stats=stats, completed_at=func.now())
             )
             self.db.commit()
 
         except Exception as e:
-            logger.error(f"Run {ingestion_run_id} FAILED: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"Run {ingestion_run_id} FAILED: {error_msg}")
+            logger.error(traceback.format_exc())
+            
             self.db.rollback()
+            
             self.db.execute(
                 update(DiscoveredArtifact).where(DiscoveredArtifact.id == artifact.id)
-                .values(status="FAILED", review_notes=str(e))
+                .values(status="FAILED", review_notes=error_msg[:1000])
+            )
+            
+            self.db.execute(
+                update(IngestionRun)
+                .where(IngestionRun.run_id == ingestion_run_id)
+                .values(status="FAILED", stats={"error": error_msg}, completed_at=func.now())
             )
             self.db.commit()
+            
         finally:
             if local_path and os.path.exists(local_path): os.remove(local_path)
 
     def _handle_row(self, row, artifact, run_id, stats, stream, mode, outcome_buf, quarantine_buf, identity_buf, adapter, plugin):
+        context_input = {}
         try:
-            # Delegate context creation to plugin
+            # 1. Enrich Data
             context_input = plugin.transform_row_to_context(row, artifact, stream)
-
-            # Resolve using Dynamic Mode
+            
+            # 2. Resolve Context (Identity + Policy Check)
             resolved = self.context_manager.resolve_context(
                 db=self.db, adapter=adapter, row_data=context_input,
                 mode=mode, ingestion_run_id=run_id
             )
 
             if not resolved:
+                # Identity Failure Case
                 identity_buf.append({
                     "raw_name": row['college_name_raw'],
                     "source_document": str(artifact.id),
@@ -178,11 +208,13 @@ class ArtifactProcessor:
                 stats['quarantined'] += 1
                 return
 
+            # 3. Success -> Add to Outcome Buffer
             outcome_buf.append({
                 "college_id": resolved.college_id,
                 "exam_code": resolved.exam_code,
                 "year": resolved.year,
                 "round_number": resolved.round,
+                "state_code": resolved.state_code,
                 "institute_code": resolved.institute_code,
                 "institute_name": resolved.institute_name,
                 "program_code": resolved.program_code,
@@ -198,24 +230,67 @@ class ArtifactProcessor:
             stats['committed'] += 1
 
         except PolicyViolationError as e:
+            try:
+                real_slug = adapter.generate_slug(context_input)
+                # Resolve the policy attributes using the ENRICHED context
+                policy_attrs = adapter.resolve_policy_attributes(context_input)
+            except Exception:
+                real_slug = "UNKNOWN_ERROR"
+                policy_attrs = {}
+
             quarantine_buf.append({
-                "exam_code": artifact.exam_code, "seat_bucket_code": "UNKNOWN",
-                "violation_type": "POLICY_VIOLATION", "source_exam": artifact.exam_code,
-                "source_year": artifact.year, "source_document": str(artifact.id),
-                "raw_row": row, "ingestion_run_id": run_id, "review_notes": str(e)
-            })
-            stats['quarantined'] += 1
-        except Exception as e:
-            quarantine_buf.append({
-                "exam_code": artifact.exam_code, "seat_bucket_code": "SYSTEM_ERROR",
-                "violation_type": "CRASH", "source_exam": artifact.exam_code,
-                "source_year": artifact.year, "source_document": str(artifact.id),
-                "raw_row": row, "ingestion_run_id": run_id, "review_notes": str(e)
+                "exam_code": artifact.exam_code, 
+                "seat_bucket_code": real_slug,
+                "violation_type": "POLICY_VIOLATION", 
+                "source_exam": artifact.exam_code,
+                "source_year": artifact.year, 
+                "source_file": str(artifact.id),
+                # CRITICAL: We save the policy_attrs here so the Triage Service 
+                # can promote it without needing the original PDF or college info.
+                "raw_row": policy_attrs, 
+                "ingestion_run_id": run_id, 
+                "review_notes": str(e)
             })
             stats['quarantined'] += 1
 
     def _flush_outcomes(self, buffer):
         if not buffer: return
+        
+        # 1. Collect unique composite keys for the batch update
+        # These keys identify the specific seat categories across all colleges
+        keys = [
+            (
+                row['exam_code'],
+                row['year'],
+                row['round_number'],
+                row['institute_code'],
+                row['program_code'],
+                row['seat_bucket_code']
+            )
+            for row in buffer
+        ]
+
+        # 2. Set is_latest=False for all matching existing records in ONE statement
+        # This satisfies the 'uq_cutoff_latest_only' constraint before the new insert
+        self.db.execute(
+            update(CutoffOutcome)
+            .where(
+                and_(
+                    tuple_(
+                        CutoffOutcome.exam_code,
+                        CutoffOutcome.year,
+                        CutoffOutcome.round_number,
+                        CutoffOutcome.institute_code,
+                        CutoffOutcome.program_code,
+                        CutoffOutcome.seat_bucket_code
+                    ).in_(keys),
+                    CutoffOutcome.is_latest == True
+                )
+            )
+            .values(is_latest=False)
+        )
+
+        # 3. Bulk insert the new batch as the new current 'latest' records
         self.db.execute(insert(CutoffOutcome), buffer)
         buffer.clear()
 
