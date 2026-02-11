@@ -37,11 +37,19 @@ services:
       context: ./backend
     container_name: derived_backend
     restart: always
+    # VIRTUAL ROOT: We work from /src so that ./temp_downloads resolves correctly
+    working_dir: /src
+    # IMPORT FIX: We tell Python to look in /src/backend for 'app' module
+    environment:
+      - PYTHONPATH=/src/backend:/src
+    # COMMAND: We run 'app.main:app' just like before. 
+    # Python finds it because of the PYTHONPATH line above.
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
-      - ./backend:/app
-      - ./ingestion:/app/ingestion
-      - ./temp_downloads:/app/temp_downloads
+      # FLATTENED MAPPING (The Fix):
+      - ./backend:/src/backend
+      - ./ingestion:/src/ingestion
+      - ./temp_downloads:/src/temp_downloads
     ports:
       - "8000:8000"
     env_file:
@@ -52,34 +60,36 @@ services:
       redis:
         condition: service_healthy
 
-  # --- THIS IS THE MISSING SERVICE ---
   ingestion:
     build: 
       context: ./backend
     container_name: derived_ingestion
     restart: unless-stopped
+    working_dir: /src
+    environment:
+      - PYTHONPATH=/src/backend:/src
     command: tail -f /dev/null 
     volumes:
-      - ./backend:/app
-      - ./ingestion:/app/ingestion          # <--- Critical Map
-      - ./temp_downloads:/app/temp_downloads # <--- Critical Map
-    environment:
-      - PYTHONPATH=/app
+      - ./backend:/src/backend
+      - ./ingestion:/src/ingestion
+      - ./temp_downloads:/src/temp_downloads
     env_file:
       - .env
     depends_on:
       postgres:
         condition: service_healthy
-  # -----------------------------------
 
   celery_worker:
     build: ./backend
+    working_dir: /src
+    # Same logic: Python finds 'app' via PYTHONPATH
     command: celery -A app.worker.celery_app worker --loglevel=info
     volumes:
-      - ./backend:/app
-      - ./ingestion:/app/ingestion
-      - ./temp_downloads:/app/temp_downloads
+      - ./backend:/src/backend
+      - ./ingestion:/src/ingestion
+      - ./temp_downloads:/src/temp_downloads
     environment:
+      - PYTHONPATH=/src/backend:/src
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
@@ -89,24 +99,23 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
 
   flower:
-    # CHANGE 1: Build from your code instead of pulling the generic image
     build: 
       context: ./backend
     container_name: derived_flower
-    
-    # CHANGE 2: Keep the specific command (Now it works because the code is there!)
+    working_dir: /src
     command: celery -A app.worker.celery_app flower --port=5555 --basic_auth=${FLOWER_USER}:${FLOWER_PASSWORD}
-    
     ports:
       - "5555:5555"
     environment:
+      - PYTHONPATH=/src/backend:/src
       - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
-      # Add DB creds just in case your worker imports them at startup
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
@@ -116,7 +125,7 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
     volumes:
-      - ./backend:/app  # <--- CRITICAL: Mounts your code
+      - ./backend:/src/backend
     depends_on:
       - redis
       - backend

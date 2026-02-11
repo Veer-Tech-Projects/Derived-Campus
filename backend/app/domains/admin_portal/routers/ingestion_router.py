@@ -5,12 +5,13 @@ from typing import List
 import uuid
 
 from app.database import SessionLocal 
-# [UPDATE] Import IngestionRun model
-from app.models import DiscoveredArtifact, IngestionRun 
+from app.models import DiscoveredArtifact, IngestionRun, AdminRole 
 from app.domains.admin_portal.services.lock_service import LockService
 from ingestion.common.process_artifacts import ArtifactProcessor
+# [UPDATE] Import Enforcer
+from app.domains.admin_auth.services.auth_dependency import get_current_admin, require_role 
 
-router = APIRouter(prefix="/ingestion", tags=["Admin Portal: Ingestion"])
+router = APIRouter(prefix="/ingestion", tags=["Admin Portal: Ingestion"], dependencies=[Depends(get_current_admin)])
 
 def get_sync_db():
     db = SessionLocal()
@@ -19,13 +20,8 @@ def get_sync_db():
     finally:
         db.close()
 
-# --- NEW: STATUS ENDPOINT ---
 @router.get("/status")
 def get_ingestion_status(db: Session = Depends(get_sync_db)):
-    """
-    Checks if any ingestion runs are currently active (RUNNING).
-    Used by the frontend to show a loading state.
-    """
     running_count = db.query(IngestionRun).filter(IngestionRun.status == "RUNNING").count()
     return {"is_ingesting": running_count > 0}
 
@@ -56,7 +52,6 @@ def run_ingestion_task(exam_code: str = "GLOBAL"):
     db = SessionLocal()
     lock_key = f"INGESTION:{exam_code}"
     locked = False 
-    
     try:
         if LockService.acquire_lock(db, lock_key):
             locked = True
@@ -71,11 +66,13 @@ def run_ingestion_task(exam_code: str = "GLOBAL"):
             LockService.release_lock(db, lock_key)
         db.close()
 
+# [SECURE] Write Action -> Requires EDITOR
 @router.post("/approve-batch")
 def approve_batch_artifacts(
     background_tasks: BackgroundTasks, 
     artifact_ids: List[uuid.UUID] = Body(..., embed=True),
-    db: Session = Depends(get_sync_db)
+    db: Session = Depends(get_sync_db),
+    _ = Depends(require_role(AdminRole.EDITOR)) # <--- Guard
 ):
     if not artifact_ids:
         raise HTTPException(status_code=400, detail="No artifacts selected")
@@ -101,11 +98,15 @@ def approve_batch_artifacts(
         raise HTTPException(status_code=500, detail=str(e))
     
     background_tasks.add_task(run_ingestion_task, "GLOBAL")
-    
     return {"status": "success", "message": f"Queued {count} artifacts for immediate ingestion."}
 
+# [SECURE] Write Action -> Requires EDITOR
 @router.post("/apply-dirty")
-def trigger_dirty_update(background_tasks: BackgroundTasks, db: Session = Depends(get_sync_db)):
+def trigger_dirty_update(
+    background_tasks: BackgroundTasks, 
+    db: Session = Depends(get_sync_db),
+    _ = Depends(require_role(AdminRole.EDITOR)) # <--- Guard
+):
     try:
         db.execute(
             text("UPDATE discovered_artifacts SET status = 'APPROVED' WHERE requires_reprocessing = true AND status = 'INGESTED'")

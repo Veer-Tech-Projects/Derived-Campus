@@ -14,9 +14,10 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner'; 
 import { fetchPendingSeatViolations, promoteSeatBucket, ignoreSeatBucket } from '@/lib/admin-api';
+import { useAuth } from '@/components/providers/auth-provider'; // <--- Auth
 
 interface ViolationGroup {
-  id: string; // The representative ID from the backend
+  id: string;
   seat_bucket_code: string;
   exam_code: string;
   source_year: number;
@@ -26,17 +27,19 @@ interface ViolationGroup {
 const PAGE_SIZE = 50;
 
 export default function SeatPolicyTriagePage() {
+  const { hasRole } = useAuth(); // <--- Auth Hook
   const [groups, setGroups] = useState<ViolationGroup[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
 
+  const canEdit = hasRole("EDITOR");
+
   const loadData = async () => {
     setIsLoading(true);
     try {
       const skip = (page - 1) * PAGE_SIZE;
-      // Backend now returns the flat array directly
       const data: any = await fetchPendingSeatViolations(skip, PAGE_SIZE);
       setGroups(data);
       setHasMore(data.length === PAGE_SIZE);
@@ -81,32 +84,33 @@ export default function SeatPolicyTriagePage() {
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-3xl font-bold tracking-tight text-slate-900">Seat Policy Triage</h1>
-            <Badge variant="outline" className="text-amber-600 bg-amber-50">Page {page}</Badge>
+            <Badge variant="outline" className="text-amber-600 bg-amber-50 border-amber-200">Page {page}</Badge>
           </div>
           <p className="text-slate-500 mt-2 max-w-2xl">
             Unknown <strong>Seat Bucket Types</strong> detected. Approving a bucket type fixes it for all colleges and files globally.
           </p>
         </div>
-        <Button onClick={loadData} variant="outline" size="sm" className="gap-2">
+        <Button onClick={loadData} variant="outline" size="sm" className="gap-2 bg-white">
           <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} /> Refresh
         </Button>
       </div>
 
       <Card className="border-slate-200 shadow-sm flex flex-col min-h-[600px]">
-        <CardHeader className="border-b bg-white/50 pb-4">
+        <CardHeader className="border-b bg-white pb-4 rounded-t-xl">
           <div className="flex items-center gap-2">
             <ShieldAlert className="w-5 h-5 text-amber-500" />
-            <CardTitle className="text-lg">Unknown Bucket Types</CardTitle>
+            <CardTitle className="text-lg text-slate-800">Unknown Bucket Types</CardTitle>
           </div>
         </CardHeader>
         
-        <CardContent className="p-0 flex-grow">
+        <CardContent className="p-0 flex-grow bg-white">
           {isLoading ? (
              <div className="p-20 text-center text-slate-400 animate-pulse">Analyzing types...</div>
           ) : groups.length === 0 ? (
              <div className="p-20 text-center flex flex-col items-center gap-4">
                <div className="bg-emerald-100 p-4 rounded-full"><CheckCircle className="w-10 h-10 text-emerald-600" /></div>
                <h3 className="text-lg font-semibold text-slate-900">Taxonomy Synced</h3>
+               <p className="text-slate-500">No unknown bucket types found.</p>
              </div>
           ) : (
             <div className="relative overflow-x-auto">
@@ -125,29 +129,44 @@ export default function SeatPolicyTriagePage() {
                       <TableCell className="align-middle py-4">
                         <div className="flex items-center gap-3">
                           <Tag className="w-4 h-4 text-slate-400" />
-                          <code className="text-sm font-mono bg-white px-2 py-1 rounded border text-slate-700 font-semibold">{group.seat_bucket_code}</code>
+                          <code className="text-sm font-mono bg-slate-50 px-2 py-1 rounded border border-slate-200 text-slate-700 font-bold">
+                            {group.seat_bucket_code}
+                          </code>
                         </div>
                       </TableCell>
                       <TableCell className="align-middle py-4">
-                         <div className="flex flex-col">
-                            <Badge variant="outline" className="w-fit mb-1 uppercase font-bold text-xs">{group.exam_code}</Badge>
-                            <span className="text-xs text-slate-500">Year: {group.source_year}</span>
-                         </div>
+                          <div className="flex flex-col">
+                            <Badge variant="outline" className="w-fit mb-1 uppercase font-bold text-[10px] tracking-wider">{group.exam_code}</Badge>
+                            <span className="text-xs text-slate-500 font-medium">Year: {group.source_year}</span>
+                          </div>
                       </TableCell>
                       <TableCell className="align-middle py-4">
-                        <Badge variant="secondary" className="bg-amber-100 text-amber-800 hover:bg-amber-200">
-                          <Layers className="w-3.5 h-3.5 mr-1.5" /> {group.count} Violations
+                        <Badge variant="secondary" className="bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-100">
+                          <Layers className="w-3 h-3 mr-1.5" /> {group.count} Violations
                         </Badge>
                       </TableCell>
                       <TableCell className="text-right align-middle py-4">
-                        <div className="flex justify-end gap-2">
-                          <Button variant="ghost" size="sm" onClick={() => handleIgnore(group.id)} disabled={processingId === group.id} className="text-slate-500 hover:text-red-600 hover:bg-red-50">
-                            <XCircle className="w-4 h-4 mr-1" /> Ignore
-                          </Button>
-                          <Button size="sm" onClick={() => handlePromote(group.id)} disabled={processingId === group.id} className="bg-emerald-600 hover:bg-emerald-700 text-white">
-                            {processingId === group.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <><CheckCircle className="w-4 h-4 mr-1" /> Approve Type</>}
-                          </Button>
-                        </div>
+                        {canEdit && (
+                          <div className="flex justify-end gap-2">
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              onClick={() => handleIgnore(group.id)} 
+                              disabled={processingId === group.id} 
+                              className="text-slate-500 hover:text-red-600 hover:bg-red-50"
+                            >
+                              <XCircle className="w-4 h-4 mr-1" /> Ignore
+                            </Button>
+                            <Button 
+                              size="sm" 
+                              onClick={() => handlePromote(group.id)} 
+                              disabled={processingId === group.id} 
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm"
+                            >
+                              {processingId === group.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <><CheckCircle className="w-4 h-4 mr-1" /> Approve Type</>}
+                            </Button>
+                          </div>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -156,11 +175,11 @@ export default function SeatPolicyTriagePage() {
             </div>
           )}
         </CardContent>
-        <CardFooter className="border-t bg-slate-50 p-4 flex justify-between items-center">
-            <div className="text-xs text-slate-500">Showing page {page}</div>
+        <CardFooter className="border-t bg-slate-50/50 p-4 flex justify-between items-center rounded-b-xl">
+            <div className="text-xs text-slate-500 font-medium">Showing page {page}</div>
             <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1 || isLoading}><ChevronLeft className="w-4 h-4 mr-1" /> Previous</Button>
-                <Button variant="outline" size="sm" onClick={() => setPage(p => p + 1)} disabled={!hasMore || isLoading}>Next <ChevronRight className="w-4 h-4 ml-1" /></Button>
+                <Button variant="outline" size="sm" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1 || isLoading} className="bg-white"><ChevronLeft className="w-4 h-4 mr-1" /> Previous</Button>
+                <Button variant="outline" size="sm" onClick={() => setPage(p => p + 1)} disabled={!hasMore || isLoading} className="bg-white">Next <ChevronRight className="w-4 h-4 ml-1" /></Button>
             </div>
         </CardFooter>
       </Card>

@@ -1,11 +1,19 @@
+import uuid
+import enum
 from sqlalchemy import (
-    Column, Integer, String, Boolean, Numeric, DateTime, Text, Index, UniqueConstraint, BigInteger, ForeignKey, CheckConstraint
+    Column, Integer, String, Boolean, Numeric, DateTime, Text, Index, UniqueConstraint, BigInteger, ForeignKey, CheckConstraint,Enum as SqEnum
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.sql import func, text
 from sqlalchemy.orm import relationship
 from app.database import Base
-import uuid
+
+
+# --- RBAC ENUM ---
+class AdminRole(str, enum.Enum):
+    SUPERADMIN = "SUPERADMIN"
+    EDITOR = "EDITOR"
+    VIEWER = "VIEWER"
 
 # --- PILLAR 2: IDENTITY RESOLUTION LAYER (LOCKED) ---
 
@@ -325,6 +333,8 @@ class IngestionRun(Base):
             name="ck_ingestion_runs_status"
         ),
         Index('idx_runs_exam', 'exam_code'),
+        Index('idx_runs_artifact', 'artifact_id'), 
+        Index('idx_runs_status', 'status'),
     )
 
 
@@ -346,4 +356,61 @@ class RegistryAuditLog(Base):
     __table_args__ = (
         # Time-based query optimization
         Index('idx_audit_timestamp', 'timestamp'),
+        Index('idx_audit_user', 'performed_by'),  
+        Index('idx_audit_entity', 'entity_id'),
+    )
+
+
+# --- ADMIN USER MODEL ---
+class AdminUser(Base):
+    __tablename__ = "admin_users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    
+    # RBAC & Status
+    role = Column(SqEnum(AdminRole), default=AdminRole.EDITOR, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    
+    # Security Tracking
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    failed_login_attempts = Column(Integer, default=0, nullable=False)
+    locked_until = Column(DateTime(timezone=True), nullable=True)
+    
+    # Lifecycle
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True), 
+        server_default=func.now(), 
+        onupdate=func.now()
+    )
+
+    # Relationships
+    audit_logs = relationship("AdminAuditTrail", back_populates="admin")
+
+# --- AUDIT TRAIL MODEL ---
+class AdminAuditTrail(Base):
+    __tablename__ = "admin_audit_trail"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    admin_id = Column(UUID(as_uuid=True), ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True)
+    
+    action = Column(String(50), nullable=False, index=True)
+    target_resource = Column(String(100), nullable=True)
+    
+    # Fix #1: Use 'default=dict' to avoid shared mutable state in Python
+    details = Column(JSONB, default=dict)
+    
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(255), nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    admin = relationship("AdminUser", back_populates="audit_logs")
+
+    # Fix #3: Composite index for fast lookup of an admin's history
+    __table_args__ = (
+        Index("idx_admin_audit_admin_created", "admin_id", "created_at"),
     )

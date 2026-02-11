@@ -1,9 +1,6 @@
-// frontend/lib/admin-api.ts
+import { apiClient } from "./api-client";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-// --- TYPE DEFINITIONS ---
-
+// ... (Type Definitions remain the same) ...
 export interface Artifact {
   id: string;
   pdf_path: string;
@@ -47,7 +44,6 @@ export interface ExamConfig {
   last_updated: string;
 }
 
-// [NEW] Seat Policy Types
 export interface SeatPolicyViolation {
   id: string;
   exam_code: string;
@@ -61,133 +57,158 @@ export interface SeatPolicyViolation {
   created_at: string;
 }
 
+export interface AdminUser {
+  id: string;
+  username: string;
+  email: string;
+  role: "SUPERADMIN" | "EDITOR" | "VIEWER";
+  is_active: boolean;
+  last_login_at: string | null;
+  created_at: string;
+}
+
+export interface AuditLog {
+  id: string;
+  admin_username: string;
+  action: string;
+  target_resource: string | null;
+  details: any;
+  ip_address: string | null;
+  created_at: string;
+}
+
 // --- DOMAIN 1: INGESTION (AIRLOCK) ---
 
 export const fetchArtifacts = async (): Promise<Artifact[]> => {
-  const res = await fetch(`${API_BASE}/ingestion/artifacts`, { cache: 'no-store' });
-  if (!res.ok) throw new Error("Failed to fetch artifacts");
-  return res.json();
+  const res = await apiClient.get("/ingestion/artifacts");
+  return res.data;
 };
 
 export const triggerDirtyIngestion = async () => {
-  const res = await fetch(`${API_BASE}/ingestion/apply-dirty`, {
-    method: "POST",
-  });
-  if (!res.ok) throw new Error("Failed to trigger ingestion");
-  return res.json();
+  const res = await apiClient.post("/ingestion/apply-dirty");
+  return res.data;
 };
 
 // --- DOMAIN 2: IDENTITY (TRIAGE) ---
 
 export const fetchCandidates = async (): Promise<Candidate[]> => {
-  const res = await fetch(`${API_BASE}/identity/candidates`, { cache: 'no-store' });
-  if (!res.ok) throw new Error("Failed to fetch candidates");
-  return res.json();
+  const res = await apiClient.get("/identity/candidates");
+  return res.data;
 };
 
-export const linkCandidate = async (candidateIds: number[], targetUuid: string, userEmail: string) => {
-  const res = await fetch(`${API_BASE}/identity/link`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ candidate_ids: candidateIds, target_registry_uuid: targetUuid, user_email: userEmail }),
+// [FIX] Removed userEmail parameter to match Backend Phase 1
+export const linkCandidate = async (candidateIds: number[], targetUuid: string) => {
+  const res = await apiClient.post("/identity/link", { 
+    candidate_ids: candidateIds, 
+    target_registry_uuid: targetUuid
+    // user_email is now extracted from JWT on backend
   });
-  if (!res.ok) throw new Error("Link failed");
-  return res.json();
+  return res.data;
 };
 
-export const promoteNewCollege = async (candidateIds: number[], officialName: string, userEmail: string) => {
-  const res = await fetch(`${API_BASE}/identity/promote-new`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ candidate_ids: candidateIds, official_name: officialName, user_email: userEmail }),
+// [FIX] Removed userEmail parameter
+export const promoteNewCollege = async (candidateIds: number[], officialName: string) => {
+  const res = await apiClient.post("/identity/promote-new", { 
+    candidate_ids: candidateIds, 
+    official_name: officialName
   });
-  if (!res.ok) throw new Error("Promotion failed");
-  return res.json();
+  return res.data;
 };
 
 // --- DOMAIN 3: REGISTRY ---
 
 export const fetchRegistry = async (): Promise<RegistryCollege[]> => {
-  const res = await fetch(`${API_BASE}/registry/colleges`, { cache: 'no-store' });
-  if (!res.ok) throw new Error("Failed to fetch registry");
-  return res.json();
+  const res = await apiClient.get("/registry/colleges");
+  return res.data;
 };
 
 export const updateCanonicalName = async (collegeId: string, newName: string) => {
-  const res = await fetch(`${API_BASE}/registry/promote-alias`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ college_id: collegeId, alias_text: newName }),
+  const res = await apiClient.post("/registry/promote-alias", { 
+    college_id: collegeId, 
+    alias_text: newName 
   });
-  if (!res.ok) throw new Error("Update failed");
-  return res.json();
+  return res.data;
 };
 
 // --- DOMAIN 4: CONFIGURATION (DASHBOARD) ---
 
 export const fetchDashboardStats = async (): Promise<DashboardStats> => {
-  const res = await fetch(`${API_BASE}/config/dashboard-stats`, { cache: 'no-store' });
-  if (!res.ok) throw new Error("Failed to fetch stats");
-  return res.json();
+  const res = await apiClient.get("/config/dashboard-stats");
+  return res.data;
 };
 
 export const fetchExamConfigs = async (): Promise<ExamConfig[]> => {
-  const res = await fetch(`${API_BASE}/config/exams`, { cache: 'no-store' });
-  if (!res.ok) throw new Error("Failed to fetch exams");
-  return res.json();
+  const res = await apiClient.get("/config/exams");
+  return res.data;
 };
 
 export const updateExamMode = async (examCode: string, mode: "BOOTSTRAP" | "CONTINUOUS") => {
-  const res = await fetch(`${API_BASE}/config/exams/${examCode}/mode`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ingestion_mode: mode }),
+  const res = await apiClient.patch(`/config/exams/${examCode}/mode`, { 
+    ingestion_mode: mode 
   });
-  if (!res.ok) throw new Error("Failed to update mode");
-  return res.json();
+  return res.data;
 };
 
 // --- DOMAIN 5: SEAT POLICY (NEW) ---
 
 export const fetchPendingSeatViolations = async (skip = 0, limit = 50): Promise<SeatPolicyViolation[]> => {
-  const res = await fetch(`${API_BASE}/admin/triage/seat-policy/pending?skip=${skip}&limit=${limit}`, { 
-    cache: 'no-store' 
+  const res = await apiClient.get(`/admin/triage/seat-policy/pending`, { 
+    params: { skip, limit } 
   });
-  if (!res.ok) throw new Error("Failed to fetch violations");
-  return res.json();
+  return res.data;
 };
 
 export const promoteSeatBucket = async (violationId: string) => {
-  const res = await fetch(`${API_BASE}/admin/triage/seat-policy/${violationId}/promote`, {
-    method: "POST",
-  });
-  if (!res.ok) throw new Error("Promotion failed");
-  return res.json();
+  const res = await apiClient.post(`/admin/triage/seat-policy/${violationId}/promote`);
+  return res.data;
 };
 
 export const ignoreSeatBucket = async (violationId: string) => {
-  const res = await fetch(`${API_BASE}/admin/triage/seat-policy/${violationId}/ignore`, {
-    method: "POST",
-  });
-  if (!res.ok) throw new Error("Ignore failed");
-  return res.json();
+  const res = await apiClient.post(`/admin/triage/seat-policy/${violationId}/ignore`);
+  return res.data;
 };
-
-
 
 export const approveBatchArtifacts = async (artifactIds: string[]) => {
-  const res = await fetch(`${API_BASE}/ingestion/approve-batch`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ artifact_ids: artifactIds }),
+  const res = await apiClient.post("/ingestion/approve-batch", { 
+    artifact_ids: artifactIds 
   });
-  if (!res.ok) throw new Error("Batch approval failed");
-  return res.json();
+  return res.data;
 };
 
-
 export const fetchIngestionStatus = async () => {
-  const res = await fetch(`${API_BASE}/ingestion/status`);
-  if (!res.ok) return { is_ingesting: false };
-  return res.json() as Promise<{ is_ingesting: boolean }>;
+  try {
+    const res = await apiClient.get("/ingestion/status");
+    return res.data as { is_ingesting: boolean };
+  } catch (e) {
+    return { is_ingesting: false };
+  }
+};
+
+// --- DOMAIN 6: TEAM MANAGEMENT (SUPER ADMIN) ---
+
+export const fetchAdmins = async (): Promise<AdminUser[]> => {
+  const res = await apiClient.get("/admin/users/");
+  return res.data;
+};
+
+export const createAdmin = async (data: { username: string; email: string; password: string; role: string }) => {
+  const res = await apiClient.post("/admin/users/", data);
+  return res.data;
+};
+
+export const updateAdmin = async (id: string, data: { role?: string; is_active?: boolean; password?: string }) => {
+  const res = await apiClient.patch(`/admin/users/${id}`, data);
+  return res.data;
+};
+
+export const deleteAdmin = async (id: string) => {
+  const res = await apiClient.delete(`/admin/users/${id}`);
+  return res.data;
+};
+
+// --- DOMAIN 7: AUDIT LOGS ---
+
+export const fetchAuditLogs = async (skip = 0, limit = 100): Promise<AuditLog[]> => {
+  const res = await apiClient.get("/admin/audit/", { params: { skip, limit } });
+  return res.data;
 };

@@ -2,14 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.services.registry_service import RegistryService
-from app.models import CollegeCandidate, DiscoveredArtifact, RegistryAuditLog
-from sqlalchemy import update
+from app.models import CollegeCandidate, DiscoveredArtifact, RegistryAuditLog, AdminRole, AdminUser
+from sqlalchemy import update, select, desc
 from typing import List
 from pydantic import BaseModel
 import uuid
-from sqlalchemy import select, desc
+# [UPDATE] Import the new role enforcer
+from app.domains.admin_auth.services.auth_dependency import get_current_admin, require_role
 
-router = APIRouter(prefix="/identity", tags=["Admin Portal: Identity"])
+router = APIRouter(prefix="/identity", tags=["Admin Portal: Identity"], dependencies=[Depends(get_current_admin)])
 
 def get_sync_db():
     db = SessionLocal()
@@ -21,16 +22,20 @@ def get_sync_db():
 class LinkRequest(BaseModel):
     candidate_ids: List[int]
     target_registry_uuid: uuid.UUID
-    user_email: str = "admin@derivedcampus.com"
+    # [FIX] Removed user_email. It is now injected securely.
 
 class PromoteRequest(BaseModel):
     candidate_ids: List[int]
     official_name: str
-    user_email: str = "admin@derivedcampus.com"
-    # state_code REMOVED completely.
+    # [FIX] Removed user_email.
 
+# [SECURE] Write Action -> Requires EDITOR
 @router.post("/link")
-def link_candidate(req: LinkRequest, db: Session = Depends(get_sync_db)):
+def link_candidate(
+    req: LinkRequest, 
+    db: Session = Depends(get_sync_db),
+    admin: AdminUser = Depends(require_role(AdminRole.EDITOR)) # <--- Guard + User Info
+):
     service = RegistryService()
     candidates = db.query(CollegeCandidate).filter(CollegeCandidate.candidate_id.in_(req.candidate_ids)).all()
     if not candidates: raise HTTPException(404, "No candidates found")
@@ -38,9 +43,10 @@ def link_candidate(req: LinkRequest, db: Session = Depends(get_sync_db)):
     for cand in candidates:
         service.link_alias(db, req.target_registry_uuid, service.normalize_name(cand.raw_name), "manual_triage")
         
+        # [FIX] Use actual admin email
         db.add(RegistryAuditLog(
             entity_type="ALIAS", entity_id=req.target_registry_uuid,
-            action="LINKED", performed_by=req.user_email,
+            action="LINKED", performed_by=admin.email, 
             reason=f"Linked candidate {cand.raw_name}"
         ))
 
@@ -54,15 +60,19 @@ def link_candidate(req: LinkRequest, db: Session = Depends(get_sync_db)):
     db.commit()
     return {"status": "linked", "count": len(candidates)}
 
+# [SECURE] Write Action -> Requires EDITOR
 @router.post("/promote-new")
-def promote_new_college(req: PromoteRequest, db: Session = Depends(get_sync_db)):
+def promote_new_college(
+    req: PromoteRequest, 
+    db: Session = Depends(get_sync_db),
+    admin: AdminUser = Depends(require_role(AdminRole.EDITOR)) # <--- Guard
+):
     service = RegistryService()
     candidates = db.query(CollegeCandidate).filter(CollegeCandidate.candidate_id.in_(req.candidate_ids)).all()
     if not candidates: raise HTTPException(404, "No candidates found")
 
     normalized = service.normalize_name(req.official_name)
     
-    # CALL SERVICE WITHOUT STATE CODE
     new_id = service.promote_candidate(
         db, 
         req.official_name, 
@@ -70,9 +80,10 @@ def promote_new_college(req: PromoteRequest, db: Session = Depends(get_sync_db))
         "manual_promotion"
     )
     
+    # [FIX] Use actual admin email
     db.add(RegistryAuditLog(
         entity_type="REGISTRY", entity_id=new_id,
-        action="CREATED", performed_by=req.user_email,
+        action="CREATED", performed_by=admin.email,
         reason=f"Promoted: {req.official_name}"
     ))
 
