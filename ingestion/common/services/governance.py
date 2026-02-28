@@ -10,6 +10,7 @@ class IngestionGovernanceController:
     """
     Enforces Zero-Trust Ingestion Policies.
     Manages the lifecycle: PENDING -> APPROVED -> INGESTED.
+    Updated for Phase A: Uses 'uq_artifact_identity' constraint.
     """
 
     def register_discovery(
@@ -27,6 +28,7 @@ class IngestionGovernanceController:
         """
         # 1. Determine Classification
         classification = "KNOWN_PATTERN"
+        # We check specific fields to ensure we don't default to KNOWN prematurely
         if not metadata.get('year') or not metadata.get('round_name'):
             classification = "UNKNOWN_PATTERN"
         
@@ -36,7 +38,6 @@ class IngestionGovernanceController:
             notification_url=notification_url,
             
             # --- STRICT IDENTITY MAPPING ---
-            # CORRECTED: Default to 'UNKNOWN' to expose bugs, not hide them.
             exam_code=metadata.get('exam_slug', 'UNKNOWN'), 
             original_name=metadata.get('original_name'),
             round_number=metadata.get('round'),
@@ -47,9 +48,13 @@ class IngestionGovernanceController:
             detection_reason=detection_reason,
             pattern_classification=classification,
             detected_source=source,
-            raw_metadata=metadata
+            raw_metadata=metadata,
+            
+            # Defaults
+            status="PENDING",
+            requires_reprocessing=False
         ).on_conflict_do_update(
-            constraint='uq_discovered_pdf',
+            constraint='uq_artifact_identity',  # <--- [FIXED] Updated Constraint Name
             set_={
                 # ENTERPRISE SAFETY: 
                 # We do NOT overwrite exam_code, round, or original_name.
@@ -106,4 +111,4 @@ class IngestionGovernanceController:
                 review_notes=f"System Error: {error_msg}"
             )
         )
-        db.commit()
+        db.commit() # Ensure error state is persisted immediately

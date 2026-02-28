@@ -39,3 +39,4 @@ backend/temp_downloads/
 Thumbs.db
 *.log
 logs/
+backend/celerybeat-schedule

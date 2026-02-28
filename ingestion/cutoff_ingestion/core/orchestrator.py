@@ -1,12 +1,21 @@
 import logging
 import requests
-import re
-import unicodedata
-from bs4 import BeautifulSoup, Tag
-from urllib.parse import urljoin
+import hashlib
+import time
+import os
+import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from sqlalchemy.orm import Session
+from sqlalchemy import select, update, func
 from ingestion.common.services.governance import IngestionGovernanceController
 from ingestion.cutoff_ingestion.core.base_plugin import BaseCutoffPlugin
+from app.models import DiscoveredArtifact
+
+# [SECURITY] Configurable Verification
+VERIFY_SSL = os.getenv("VERIFY_SSL", "false").lower() == "true"
+if not VERIFY_SSL:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -14,136 +23,168 @@ logger = logging.getLogger(__name__)
 class UniversalNotificationOrchestrator:
     def __init__(self, governance: IngestionGovernanceController):
         self.governance = governance
+        self.request_timeout = 30
+        
+        # --- ENTERPRISE RESILIENCE: Connection Pooling & Retries ---
+        self.session = requests.Session()
+        retries = Retry(
+            total=3,                # Try 3 times
+            backoff_factor=1,       # Wait 1s, 2s, 4s...
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET"]
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
-    def _make_fingerprint(self, text: str) -> str:
-        if not text: return ""
-        text = unicodedata.normalize('NFD', text)
-        text = re.sub(r'[\u200c\u200d\s\-\(\)\[\]\{\}\.,_\|]', '', text)
-        return unicodedata.normalize('NFC', text).upper()
+    def _get_remote_fingerprint(self, url: str, headers: dict) -> tuple[bool, str, int]:
+        """
+        Robust 'Head Check' with Range GET Fallback.
+        """
+        try:
+            # 1. Attempt HEAD
+            resp = self.session.head(url, headers=headers, timeout=self.request_timeout, allow_redirects=True, verify=VERIFY_SSL)
+            
+            # 2. Gov server blocked HEAD? Try Streamed GET.
+            if resp.status_code >= 400:
+                resp = self.session.get(url, headers=headers, stream=True, timeout=self.request_timeout, verify=VERIFY_SSL)
+                resp.close() 
 
-    def _normalize_text_for_parsing(self, text: str) -> str:
-        if not text: return ""
-        text = unicodedata.normalize('NFC', text).upper()
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip()
+            if resp.status_code >= 400: 
+                return False, None, 0
+
+            # 3. Hashing Strategy (Ironclad)
+            etag = resp.headers.get('ETag', '').strip('"')
+            
+            if not etag:
+                lm = resp.headers.get('Last-Modified')
+                cl = resp.headers.get('Content-Length')
+                
+                if lm or cl:
+                    # Synthetic Hash from Metadata
+                    etag = hashlib.md5(f"{lm}{cl}".encode()).hexdigest()
+                else:
+                    # [RANGE GET FALLBACK]
+                    # If metadata is missing, download first 4KB to fingerprint content.
+                    try:
+                        range_header = headers.copy()
+                        range_header["Range"] = "bytes=0-4096"
+                        partial_resp = self.session.get(url, headers=range_header, timeout=10, verify=VERIFY_SSL)
+                        if partial_resp.status_code in [200, 206]:
+                            etag = hashlib.md5(partial_resp.content).hexdigest()
+                        else:
+                            # Total desperation fallback
+                            etag = hashlib.md5(url.encode()).hexdigest()
+                    except:
+                        etag = hashlib.md5(url.encode()).hexdigest()
+            
+            size = int(resp.headers.get('Content-Length', 0))
+            return True, etag, size
+
+        except Exception as e:
+            logger.warning(f"Liveness Check Failed: {url} - {e}")
+            return False, None, 0
 
     def scan(self, db: Session, plugin: BaseCutoffPlugin, year: int) -> int:
         urls = plugin.get_seed_urls()
         target_url = urls.get(year)
         if not target_url: return 0
 
-        logger.info(f"--- SCANNING {plugin.get_slug().upper()} ({year}) ---")
-        headers = getattr(plugin, 'get_request_headers', lambda: {'User-Agent': 'Mozilla/5.0'})()
-
+        logger.info(f"--- SCANNING {plugin.get_slug().upper()} ({year}) ---\nSource: {target_url}")
+        
+        headers = getattr(plugin, 'get_request_headers', lambda: {'User-Agent': 'DerivedBot/1.0'})()
+        
+        # 1. Fetch Seed Page
         try:
-            response = requests.get(target_url, headers=headers, verify=False, timeout=30)
+            response = self.session.get(target_url, headers=headers, timeout=self.request_timeout, verify=VERIFY_SSL)
             response.raise_for_status()
         except Exception as e:
-            logger.error(f"Network Failure: {e}")
+            logger.error(f"Failed to fetch seed page: {e}")
             return 0
 
-        soup = BeautifulSoup(response.content, 'html.parser')
-        block_filters = plugin.get_notification_filters()
+        # 2. DELEGATE TO SCANNER STRATEGY
+        scanner = plugin.get_scanner()
+        artifacts = scanner.extract_artifacts(response.content, target_url)
         
-        pos_fps = {self._make_fingerprint(k) for k in block_filters['positive']}
-        neg_fps = {self._make_fingerprint(k) for k in block_filters['negative']}
-        child_negatives = [self._normalize_text_for_parsing(n) for n in plugin.get_child_filters()]
-        
-        new_count = 0
-        processed_urls = set()
+        # --- OBSERVABILITY METRICS ---
+        metrics = {"found": len(artifacts), "new": 0, "updated": 0, "failed": 0, "skipped_dead": 0}
+        logger.info(f"Scanner identified {metrics['found']} valid candidates.")
 
-        # 1. FIND STRUCTURAL HEADERS
-        # We explicitly EXCLUDE 'a' tags here. A PDF link is an Artifact, NOT a Notification Title.
-        potential_headers = soup.find_all(['button', 'h5', 'strong', 'span', 'p', 'div'])
+        # 3. PROCESS LOOP
+        for item in artifacts:
+            # Check DB (Read - Fast)
+            existing_artifact = db.execute(
+                select(DiscoveredArtifact).where(
+                    DiscoveredArtifact.exam_code == plugin.get_slug(),
+                    DiscoveredArtifact.year == year,
+                    DiscoveredArtifact.pdf_path == item.url
+                )
+            ).scalar_one_or_none()
 
-        for header in potential_headers:
-            # Skip if this element is just a wrapper around a link we'll process later
-            if header.find('a', href=True): 
-                continue
+            # [EFFICIENCY] Politeness Delay only before Network Calls
+            time.sleep(plugin.get_politeness_delay())
 
-            raw_text = header.get_text(" ", strip=True)
-            if len(raw_text) < 5: continue
+            # Liveness Check (Network - Slow)
+            is_live, remote_hash, size = self._get_remote_fingerprint(item.url, headers)
+            if not is_live: 
+                metrics["skipped_dead"] += 1
+                continue 
 
-            # 2. DOUBLE GATE (Mandatory for Titles)
-            header_fp = self._make_fingerprint(raw_text)
-            has_positive = any(fp in header_fp for fp in pos_fps)
-            has_negative = any(fp in header_fp for fp in neg_fps)
+            # DB Operations (Write)
+            try:
+                if existing_artifact:
+                    existing_artifact.last_seen_at = func.now()
+                    
+                    if existing_artifact.content_hash is None:
+                        existing_artifact.content_hash = remote_hash
+                        db.commit()
+                        metrics["updated"] += 1
+                        continue
+                    
+                    if existing_artifact.content_hash != remote_hash:
+                        logger.warning(f"⚠️ Silent Revision: {item.url}")
+                        existing_artifact.previous_content_hash = existing_artifact.content_hash
+                        existing_artifact.content_hash = remote_hash
+                        if existing_artifact.status != "PENDING":
+                            existing_artifact.status = "PENDING"
+                            existing_artifact.review_notes = f"Auto-Reset. Size: {size}b"
+                        db.commit()
+                        metrics["updated"] += 1
+                    else:
+                        db.commit()
+                else:
+                    clean_name, original_name, is_standardized = plugin.normalize_artifact_name(item.link_text)
+                    
+                    metadata = {
+                        "year": year,
+                        "round_name": clean_name,
+                        "original_name": original_name,
+                        "is_standardized": is_standardized,
+                        "round": item.detected_round, 
+                        "seat_type": None, 
+                        "exam_slug": plugin.get_slug(),
+                        "detection_method": item.detection_method,
+                        "context_header": item.context_header
+                    }
 
-            if not has_positive or has_negative:
-                continue
-
-            # 3. ROUND DETECTION
-            detected_round = plugin.normalize_round(self._normalize_text_for_parsing(raw_text))
-            if detected_round is None:
-                continue
-
-            # 4. SCOPE RESOLUTION (Find the Container)
-            scope_links = []
-            
-            # Strategy A: Bootstrap Accordion (Target ID)
-            target_id = header.get('data-target') or header.get('aria-controls')
-            if target_id:
-                clean_id = target_id.replace('#', '')
-                target_div = soup.find(id=clean_id)
-                if target_div:
-                    scope_links = target_div.find_all('a', href=True)
-
-            # Strategy B: Sibling Scan (Legacy/Linear Layout)
-            if not scope_links:
-                # Look at next siblings until we hit another likely header or container
-                curr = header.next_sibling
-                while curr:
-                    if isinstance(curr, Tag):
-                        # Stop if we hit another header-like element
-                        if curr.name in ['h5', 'button', 'h4', 'h3']: 
-                            break
-                        scope_links.extend(curr.find_all('a', href=True))
-                        # If the tag itself is a link, add it
-                        if curr.name == 'a' and curr.has_attr('href'):
-                            scope_links.append(curr)
-                    curr = curr.next_sibling
-
-            # 5. PROCESS LINKS IN SCOPE
-            for link in scope_links:
-                full_url = urljoin(target_url, link['href'])
-                
-                # Basic Guard
-                if not full_url.lower().endswith('.pdf'): continue
-                if full_url in processed_urls: continue
-
-                link_text = link.get_text(" ", strip=True)
-                norm_link = self._normalize_text_for_parsing(link_text)
-
-                # NEGATIVE FILTER ONLY (User Requirement)
-                # We do NOT check for positive keywords here. Inheritance is trusted.
-                if any(neg in norm_link for neg in child_negatives):
-                    continue
-
-                processed_urls.add(full_url)
-                
-                # Standardize Name
-                clean_name, original_name, is_standardized = plugin.normalize_artifact_name(link_text)
-
-                metadata = {
-                    "year": year,
-                    "round_name": clean_name,
-                    "original_name": original_name,
-                    "is_standardized": is_standardized,
-                    "round": detected_round,
-                    "seat_type": None,
-                    "exam_slug": plugin.get_slug()
-                }
-
-                try:
-                    self.governance.register_discovery(
-                        db=db, pdf_path=full_url, notification_url=target_url,
-                        metadata=metadata, detection_reason="ScopedContextDiscovery",
+                    art_id = self.governance.register_discovery(
+                        db=db, pdf_path=item.url, notification_url=target_url,
+                        metadata=metadata, detection_reason=f"Scanner:{item.detection_method}",
                         source="PDF_LINK"
                     )
+                    db.execute(
+                        update(DiscoveredArtifact)
+                        .where(DiscoveredArtifact.id == art_id)
+                        .values(content_hash=remote_hash)
+                    )
                     db.commit()
-                    new_count += 1
-                except:
-                    db.rollback()
+                    metrics["new"] += 1
+                    logger.info(f"✅ Discovered: {clean_name} (Round: {item.detected_round})")
+                    
+            except Exception as e:
+                db.rollback()
+                metrics["failed"] += 1
+                logger.error(f"Transaction failed for {item.url}: {e}")
 
-        logger.info(f"[{year}] Final Ingestion: {new_count} unique artifacts.")
-        return new_count
+        logger.info(f"[{year}] Run Complete. Metrics: {metrics}")
+        return metrics["new"]

@@ -48,11 +48,15 @@ class ContextManager:
             # Validate Round FIRST. If invalid, we quarantine immediately.
             valid_round = adapter.resolve_round(row_data) 
             slug = adapter.generate_slug(row_data)
+            
+            # [CRITICAL FIX] Moved policy attributes resolution INTO the safety block.
+            # If the Adapter throws a ValueError (e.g. Unrecognized Category 'D'),
+            # it is safely caught and converted into a Quarantine Event.
+            policy_attrs = adapter.resolve_policy_attributes(row_data)
+            
         except ValueError as e:
              raise PolicyViolationError(str(e)) # Convert to Quarantine Event
 
-        policy_attrs = adapter.resolve_policy_attributes(row_data)
-        
         # 3. Governance
         self._ensure_taxonomy(db, slug, adapter.get_exam_code(), policy_attrs, mode)
 
@@ -67,7 +71,7 @@ class ContextManager:
             seat_bucket_code=slug,
             exam_code=adapter.get_exam_code(),
             year=row_data['year'],
-            round=valid_round, # NEW: Explicitly passed
+            round=valid_round, 
             state_code=adapter.get_state_code(row_data),
             
             course_type=policy_attrs.get('course_type'),

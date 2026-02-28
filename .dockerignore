@@ -1,0 +1,24 @@
+# --- .dockerignore ---
+
+# Ignore Database & Cache Data (Fixes Permission Error)
+data/
+postgres_data/
+redis_data/
+
+# Ignore huge downloads
+temp_downloads/
+
+# Ignore Version Control
+.git/
+.gitignore
+
+# Ignore Virtual Environments
+venv/
+env/
+.env
+
+# Ignore Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

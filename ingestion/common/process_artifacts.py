@@ -114,9 +114,16 @@ class ArtifactProcessor:
                 ))
                 self.db.flush()
 
-            # 3. DOWNLOAD & PREPARE
-            local_path = self._download_file(artifact.pdf_path, artifact.id)
-            parser = plugin.get_parser(local_path)
+           # 3. DOWNLOAD & PREPARE
+            local_path = self._download_file(artifact.pdf_path, artifact.id, plugin)
+            
+            # --- [CRITICAL FIX] DYNAMIC PARSER RESOLUTION ---
+            if hasattr(plugin, 'get_parser_with_context'):
+                parser = plugin.get_parser_with_context(local_path, artifact)
+            else:
+                parser = plugin.get_parser(local_path)
+            # ------------------------------------------------
+            
             adapter = plugin.get_adapter()
             sanitized_stream = plugin.sanitize_round_name(artifact.round_name)
             
@@ -221,6 +228,7 @@ class ArtifactProcessor:
                 "program_name": resolved.program_name,
                 "seat_bucket_code": resolved.seat_bucket_code,
                 "closing_rank": int(float(row['cutoff_rank'])),
+                "cutoff_percentile": row.get('cutoff_percentile'),
                 "source_authority": resolved.exam_code,
                 "created_by": "universal_etl",
                 "source_document": str(artifact.id),
@@ -247,7 +255,7 @@ class ArtifactProcessor:
                 "source_file": str(artifact.id),
                 # CRITICAL: We save the policy_attrs here so the Triage Service 
                 # can promote it without needing the original PDF or college info.
-                "raw_row": policy_attrs, 
+                "raw_row":{"error": str(e), "attributes": policy_attrs}, 
                 "ingestion_run_id": run_id, 
                 "review_notes": str(e)
             })
@@ -256,10 +264,10 @@ class ArtifactProcessor:
     def _flush_outcomes(self, buffer):
         if not buffer: return
         
-        # 1. Collect unique composite keys for the batch update
-        # These keys identify the specific seat categories across all colleges
-        keys = [
-            (
+        # [ENTERPRISE SHIELD] Observable In-Memory Deduplication
+        unique_map = {}
+        for row in buffer:
+            unique_key = (
                 row['exam_code'],
                 row['year'],
                 row['round_number'],
@@ -267,11 +275,27 @@ class ArtifactProcessor:
                 row['program_code'],
                 row['seat_bucket_code']
             )
-            for row in buffer
-        ]
+            
+            if unique_key not in unique_map:
+                unique_map[unique_key] = row
+            else:
+                # [OBSERVABILITY FIX] Log collisions instead of failing silently!
+                existing_row = unique_map[unique_key]
+                if existing_row['closing_rank'] != row['closing_rank']:
+                    logger.error(
+                        f"🚨 DATA COLLISION: Conflicting ranks found for {unique_key}! "
+                        f"Rank A: {existing_row['closing_rank']} | Rank B: {row['closing_rank']}. "
+                        f"Action: Preserving first extracted occurrence."
+                    )
+                else:
+                    logger.debug(f"♻️ Dropped exact PDF pagination duplicate for {unique_key}")
 
-        # 2. Set is_latest=False for all matching existing records in ONE statement
-        # This satisfies the 'uq_cutoff_latest_only' constraint before the new insert
+        deduped_buffer = list(unique_map.values())
+        
+        # 1. Collect keys for update
+        keys = [k for k in unique_map.keys()]
+
+        # 2. Set is_latest=False for all matching existing records
         self.db.execute(
             update(CutoffOutcome)
             .where(
@@ -290,8 +314,8 @@ class ArtifactProcessor:
             .values(is_latest=False)
         )
 
-        # 3. Bulk insert the new batch as the new current 'latest' records
-        self.db.execute(insert(CutoffOutcome), buffer)
+        # 3. Bulk insert the clean, deduplicated batch
+        self.db.execute(insert(CutoffOutcome), deduped_buffer)
         buffer.clear()
 
     def _flush_quarantine(self, buffer):
@@ -304,14 +328,99 @@ class ArtifactProcessor:
         self.db.execute(insert(CollegeCandidate), buffer)
         buffer.clear()
 
-    def _download_file(self, url: str, artifact_id) -> str:
+    def _download_file(self, url: str, artifact_id, plugin=None) -> str:
+        from urllib.parse import urlparse, urljoin
+        from bs4 import BeautifulSoup
+        import os, requests, shutil, re, base64
+        
         local_filename = os.path.join(self.temp_dir, f"{artifact_id}.pdf")
         if url.startswith("http"):
-            response = requests.get(url, stream=True, timeout=30)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            }
+            if plugin and hasattr(plugin, 'get_request_headers'):
+                headers.update(plugin.get_request_headers())
+            
+            session = requests.Session()
+            session.headers.update(headers)
+            
+            parsed_url = urlparse(url)
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}/"
+            session.headers.update({"Referer": base_url}) 
+            
+            logger.info(f"🔄 Bootstrapping Session from {base_url}...")
+            try:
+                session.get(base_url, timeout=15) 
+            except Exception: pass
+
+            logger.info(f"⬇️ Downloading artifact from {url}...")
+            response = session.get(url, stream=True, timeout=30)
             response.raise_for_status()
-            with open(local_filename, 'wb') as f: shutil.copyfileobj(response.raw, f)
+            
+            raw_content = response.content
+            content_type = response.headers.get('Content-Type', '').lower()
+            
+            # --- 1. THE TRUTH DETECTOR ---
+            if raw_content.startswith(b'%PDF'):
+                logger.info("✅ Raw PDF bytes detected. Bypassing Content-Type header lie.")
+                with open(local_filename, 'wb') as f: 
+                    f.write(raw_content)
+                return local_filename
+            
+            # --- 2. THE SMART EXTRACTOR ---
+            if 'text/html' in content_type or not raw_content.startswith(b'%PDF'):
+                logger.info(f"📄 Detected HTML response. Searching for hidden PDF payloads...")
+                
+                # [NEW] 2A. The Base64 JavaScript Decoder
+                # 'JVBER' is the universal Base64 encoding for '%PDF'
+                b64_match = re.search(r'[\'"](JVBER[A-Za-z0-9+/=]+)[\'"]', response.text)
+                if b64_match:
+                    logger.info("🧩 Found Base64 encoded PDF payload inside JavaScript! Decoding...")
+                    pdf_bytes = base64.b64decode(b64_match.group(1))
+                    with open(local_filename, 'wb') as f:
+                        f.write(pdf_bytes)
+                    return local_filename
+
+                # 2B. Standard HTML embedding
+                soup = BeautifulSoup(raw_content, 'html.parser')
+                pdf_url = None
+                
+                iframe = soup.find('iframe')
+                if iframe and iframe.get('src'):
+                    pdf_url = iframe.get('src')
+                elif soup.find('object', type='application/pdf'):
+                    pdf_url = soup.find('object', type='application/pdf').get('data')
+                elif soup.find('embed', type='application/pdf'):
+                    pdf_url = soup.find('embed', type='application/pdf').get('src')
+                elif soup.find('a', href=lambda h: h and '.pdf' in h.lower()):
+                    pdf_url = soup.find('a', href=lambda h: h and '.pdf' in h.lower()).get('href')
+                else:
+                    match = re.search(r'[\'"]([^\'"]+\.pdf)[\'"]', response.text, re.IGNORECASE)
+                    if match: pdf_url = match.group(1)
+
+                if not pdf_url:
+                    logger.error(f"❌ HTML DUMP (First 1000 chars):\n{response.text[:1000]}\n")
+                    raise ValueError("Blocked by Server. No PDF found. (See HTML Dump in logs above).")
+                
+                pdf_url = urljoin(url, pdf_url)
+                logger.info(f"🔗 Resolved True PDF URL: {pdf_url}")
+                
+                response = session.get(pdf_url, stream=True, timeout=30)
+                response.raise_for_status()
+                
+                if not response.content.startswith(b'%PDF'):
+                    raise ValueError("Extracted URL still did not return raw PDF bytes.")
+                    
+                with open(local_filename, 'wb') as f: 
+                    f.write(response.content)
+
         else:
             shutil.copy(url, local_filename)
+            
         return local_filename
 
 if __name__ == "__main__":

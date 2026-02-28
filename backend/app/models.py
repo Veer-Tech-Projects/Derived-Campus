@@ -116,6 +116,45 @@ class KCETCollegeMetadata(Base):
     )
 
 
+class NeetCollegeMetadata(Base):
+    __tablename__ = "neet_college_metadata"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    college_id = Column(UUID(as_uuid=True), ForeignKey("college_registry.college_id"), nullable=False)
+    kea_college_code = Column(String(16), nullable=False)
+    kea_college_name_raw = Column(Text, nullable=False) 
+    course_type = Column(String(32), nullable=False)    
+    year = Column(Integer, nullable=False)
+    source_artifact_id = Column(UUID(as_uuid=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('college_id', 'course_type', 'year', name='uq_neet_metadata_identity'),
+        # Protects against duplicating KEA codes in the same year/course
+        UniqueConstraint('kea_college_code', 'course_type', 'year', name='uq_neet_metadata_code_year'),
+        Index('idx_neet_code_lookup', 'kea_college_code', 'year'),
+        Index('idx_neet_college_id', 'college_id'), 
+    )
+
+class MhtcetCollegeMetadata(Base):
+    __tablename__ = "mhtcet_college_metadata"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    
+    # EXACT MATCH TO YOUR SCHEMA: "college_registry.college_id"
+    college_id = Column(UUID(as_uuid=True), ForeignKey("college_registry.college_id"), nullable=False)
+    
+    dte_code = Column(String(50), nullable=False, index=True) 
+    dte_name_raw = Column(Text, nullable=False)
+    course_type = Column(String(32), nullable=False)
+    year = Column(Integer, nullable=False)
+    source_artifact_id = Column(UUID(as_uuid=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('dte_code', 'course_type', 'year', name='uq_mhtcet_metadata_identity'),
+        Index('idx_mhtcet_code_lookup', 'dte_code', 'year'),
+        Index('idx_mhtcet_college_id', 'college_id'),
+    )
+
 # --- PILLAR 1: CANONICAL FACT STORAGE (UPDATED) ---
 
 class CutoffOutcome(Base):
@@ -275,8 +314,14 @@ class DiscoveredArtifact(Base):
 
     requires_reprocessing = Column(Boolean, default=False)
 
+    # --- [NEW] INTEGRITY & MUTABILITY ---
+    content_hash = Column(String(64), nullable=True)
+    previous_content_hash = Column(String(64), nullable=True)
+    # Use server_default=func.now() for DB-level timestamping
+    last_seen_at = Column(DateTime(timezone=True), server_default=func.now())
+
     __table_args__ = (
-        UniqueConstraint('pdf_path', 'notification_url', name='uq_discovered_pdf'),
+        UniqueConstraint('exam_code', 'year', 'pdf_path', name='uq_artifact_identity'),
     )
 
 
@@ -293,12 +338,21 @@ class ExamConfiguration(Base):
     ingestion_mode = Column(String(32), server_default="CONTINUOUS", nullable=False)
     config_overrides = Column(JSONB, server_default=text("'{}'::jsonb"), nullable=False)
     
+    # --- [NEW] RESILIENCE & ISOLATION (Phase A) ---
+    # Tracks how many times we failed in a row (Circuit Breaker)
+    consecutive_failure_count = Column(Integer, default=0, server_default=text('0'), nullable=False)
+    
+    # Locks this specific exam so Bootstrap doesn't collide with Continuous
+    is_under_maintenance = Column(Boolean, default=False, server_default=text('false'), nullable=False)
+    
+    # Heartbeat tracker
+    last_scan_at = Column(DateTime(timezone=True), nullable=True)
+
     # Audit: Creation vs Mutation
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        # [NEW FIX] Strict Mode Enforcement
         CheckConstraint(
             "ingestion_mode IN ('BOOTSTRAP', 'CONTINUOUS')",
             name="ck_exam_ingestion_mode"

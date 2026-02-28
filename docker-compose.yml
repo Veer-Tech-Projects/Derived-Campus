@@ -27,111 +27,121 @@ services:
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a $REDIS_PASSWORD ping"]
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   backend:
-    build: 
-      context: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: derived_backend_image
     container_name: derived_backend
     restart: always
-    # VIRTUAL ROOT: We work from /src so that ./temp_downloads resolves correctly
-    working_dir: /src
-    # IMPORT FIX: We tell Python to look in /src/backend for 'app' module
+    working_dir: /src/backend
     environment:
       - PYTHONPATH=/src/backend:/src
-    # COMMAND: We run 'app.main:app' just like before. 
-    # Python finds it because of the PYTHONPATH line above.
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    volumes:
-      # FLATTENED MAPPING (The Fix):
-      - ./backend:/src/backend
-      - ./ingestion:/src/ingestion
-      - ./temp_downloads:/src/temp_downloads
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  ingestion:
-    build: 
-      context: ./backend
-    container_name: derived_ingestion
-    restart: unless-stopped
-    working_dir: /src
-    environment:
-      - PYTHONPATH=/src/backend:/src
-    command: tail -f /dev/null 
-    volumes:
-      - ./backend:/src/backend
-      - ./ingestion:/src/ingestion
-      - ./temp_downloads:/src/temp_downloads
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  celery_worker:
-    build: ./backend
-    working_dir: /src
-    # Same logic: Python finds 'app' via PYTHONPATH
-    command: celery -A app.worker.celery_app worker --loglevel=info
-    volumes:
-      - ./backend:/src/backend
-      - ./ingestion:/src/ingestion
-      - ./temp_downloads:/src/temp_downloads
-    environment:
-      - PYTHONPATH=/src/backend:/src
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_HOST=postgres
       - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    ports:
+      - "8000:8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./backend:/src/backend
+      - ./ingestion:/src/ingestion
+      - ./temp_downloads:/src/temp_downloads
+      - ./scripts:/src/scripts
+    env_file:
+      - .env
     depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  ingestion:
+    image: derived_backend_image
+    container_name: derived_ingestion
+    restart: unless-stopped
+    working_dir: /src/backend
+    environment:
+      - PYTHONPATH=/src/backend:/src
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+    command: tail -f /dev/null
+    volumes:
+      - ./backend:/src/backend
+      - ./ingestion:/src/ingestion
+      - ./temp_downloads:/src/temp_downloads
+    env_file:
+      - .env
+    depends_on:
+      - backend 
+      - postgres
+
+  celery_worker:
+    image: derived_backend_image
+    container_name: derived_worker
+    restart: always
+    working_dir: /src/backend
+    command: celery -A app.worker.celery_app worker -Q ingestion_queue,bootstrap_queue,default -l INFO --concurrency=2
+    environment:
+      - PYTHONPATH=/src/backend:/src
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/src/backend
+      - ./ingestion:/src/ingestion
+    depends_on:
+      - postgres
+      - redis
+
+  celery_beat:
+    image: derived_backend_image
+    container_name: derived_beat
+    restart: always
+    working_dir: /src/backend
+    command: celery -A app.worker.celery_app beat -l INFO
+    environment:
+      - PYTHONPATH=/src/backend:/src
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    env_file: 
+      - .env
+    volumes:
+      - ./backend:/src/backend
+      - ./ingestion:/src/ingestion
+    depends_on:
+      - redis
 
   flower:
-    build: 
-      context: ./backend
+    image: derived_backend_image
     container_name: derived_flower
-    working_dir: /src
-    command: celery -A app.worker.celery_app flower --port=5555 --basic_auth=${FLOWER_USER}:${FLOWER_PASSWORD}
+    working_dir: /src/backend
     ports:
       - "5555:5555"
+    command: celery -A app.worker.celery_app flower --port=5555 --basic_auth=${FLOWER_USER}:${FLOWER_PASSWORD}
     environment:
       - PYTHONPATH=/src/backend:/src
       - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=${POSTGRES_PORT}
       - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    env_file: 
+      - .env
     volumes:
       - ./backend:/src/backend
     depends_on:
       - redis
-      - backend
 
 volumes:
   postgres_sot_data:
-    driver: local
   redis_cache_data:
-    driver: local
+
+# --- THE CRITICAL FIX ---
+# Forces the entire Compose network to shrink packets to fit your Android hotspot
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: 1280
