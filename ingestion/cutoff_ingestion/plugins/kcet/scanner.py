@@ -3,7 +3,7 @@ import re
 import unicodedata
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup, Tag
-from typing import List
+from typing import List, Optional
 from ingestion.cutoff_ingestion.core.base_scanner import BaseScanner, ScannedArtifact
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class KCETScanner(BaseScanner):
         text = re.sub(r'\s+', ' ', text)
         return text.strip()
 
-    def extract_artifacts(self, html_content: bytes, base_url: str) -> List[ScannedArtifact]:
+    def extract_artifacts(self, html_content: bytes, base_url: str, year: Optional[int] = None) -> List[ScannedArtifact]:
         soup = BeautifulSoup(html_content, 'html.parser')
         results = []
         processed_urls = set()

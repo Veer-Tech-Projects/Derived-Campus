@@ -1,0 +1,33 @@
+import re
+
+# --- 1. ASP.NET CRYPTOGRAPHIC & STATE TOKENS ---
+TOKEN_VIEWSTATE = "__VIEWSTATE"
+TOKEN_VIEWSTATEGENERATOR = "__VIEWSTATEGENERATOR"
+TOKEN_EVENTVALIDATION = "__EVENTVALIDATION"
+TOKEN_EVENTTARGET = "__EVENTTARGET"
+TOKEN_EVENTARGUMENT = "__EVENTARGUMENT"
+TOKEN_LASTFOCUS = "__LASTFOCUS"
+
+# The State Matrix Invariants
+REQUIRED_TOKENS = {TOKEN_VIEWSTATE, TOKEN_EVENTVALIDATION, TOKEN_VIEWSTATEGENERATOR}
+
+# --- 2. JOSAA SPECIFIC KEYS ---
+BTN_SUBMIT_NAME = "ctl00$ContentPlaceHolder1$btnSubmit"
+BTN_SUBMIT_VALUE = "Submit"
+TARGET_VALUE_ALL = "ALL"
+
+# --- 3. EXECUTION BOUNDS ---
+JITTER_MIN_SEC = 1.2
+JITTER_MAX_SEC = 2.0
+MAX_RETRIES_PER_ROUND = 3
+STREAM_CHUNK_SIZE = 8192
+MAX_GRID_PROBE_BYTES = 1_000_000
+
+# --- 4. KNOWN ERROR SIGNATURES ---
+KNOWN_ASPNET_ERRORS = [
+    re.compile(r"Runtime Error", re.IGNORECASE),
+    re.compile(r"Validation of viewstate MAC failed", re.IGNORECASE),
+    re.compile(r"Object reference not set to an instance of an object", re.IGNORECASE),
+    re.compile(r"Session Expired", re.IGNORECASE),
+    re.compile(r"Server Error in", re.IGNORECASE)
+]

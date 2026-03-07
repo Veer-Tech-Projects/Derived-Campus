@@ -40,7 +40,29 @@ class UniversalNotificationOrchestrator:
     def _get_remote_fingerprint(self, url: str, headers: dict) -> tuple[bool, str, int]:
         """
         Robust 'Head Check' with Range GET Fallback.
+        Now natively supports local file artifacts (e.g., JoSAA HTML dumps).
         """
+        # --- LOCAL FILE ARTIFACT BYPASS ---
+        if url.startswith("./") or url.startswith("/"):
+            try:
+                if not os.path.exists(url):
+                    return False, None, 0
+                
+                size = os.path.getsize(url)
+                
+                # Calculate true MD5 hash of the local file
+                hasher = hashlib.md5()
+                with open(url, 'rb') as f:
+                    for chunk in iter(lambda: f.read(4096), b""):
+                        hasher.update(chunk)
+                
+                return True, hasher.hexdigest(), size
+            except Exception as e:
+                logger.warning(f"Local Liveness Check Failed for {url}: {e}")
+                return False, None, 0
+        # ----------------------------------
+
+        # --- REMOTE URL CHECK (KCET, MH-CET) ---
         try:
             # 1. Attempt HEAD
             resp = self.session.head(url, headers=headers, timeout=self.request_timeout, allow_redirects=True, verify=VERIFY_SSL)
@@ -104,7 +126,7 @@ class UniversalNotificationOrchestrator:
 
         # 2. DELEGATE TO SCANNER STRATEGY
         scanner = plugin.get_scanner()
-        artifacts = scanner.extract_artifacts(response.content, target_url)
+        artifacts = scanner.extract_artifacts(response.content, target_url, year=year)
         
         # --- OBSERVABILITY METRICS ---
         metrics = {"found": len(artifacts), "new": 0, "updated": 0, "failed": 0, "skipped_dead": 0}

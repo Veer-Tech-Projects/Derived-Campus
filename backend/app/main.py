@@ -11,7 +11,8 @@ from app.domains.admin_portal.routers import (
     registry_router, 
     config_router, 
     seat_triage_router,
-    audit_router # <--- Add audit_router
+    audit_router,
+    media_governance_router
 )
 # [UPDATE] Add admin_management_router
 from app.domains.admin_auth.routers import auth_router, admin_management_router 
@@ -39,6 +40,7 @@ app.include_router(registry_router.router)
 app.include_router(config_router.router)
 app.include_router(seat_triage_router.router)
 app.include_router(auth_router.router)
+app.include_router(media_governance_router.router)
 
 # [NEW ROUTERS]
 app.include_router(admin_management_router.router)

@@ -9,10 +9,13 @@ from ingestion.cutoff_ingestion.plugins.neet.states.ka.plugin import KarnatakaNE
 from ingestion.cutoff_ingestion.plugins.mhtcet.courses.be.plugin import MHTCETBTechPlugin
 from ingestion.cutoff_ingestion.plugins.mhtcet.courses.pharma.plugin import MHTCETPharmaPlugin
 
-# --- NEW: MAHARASHTRA MEDICAL PLUGINS ---
+# --- MAHARASHTRA MEDICAL PLUGINS ---
 from ingestion.cutoff_ingestion.plugins.neet.states.mh.courses.ug.plugin import MHNeetUGPlugin
 from ingestion.cutoff_ingestion.plugins.neet.states.mh.courses.nursing.plugin import MHNursingPlugin
 from ingestion.cutoff_ingestion.plugins.neet.states.mh.courses.ayush_aiq.plugin import MHNeetAyushAiqPlugin
+
+# --- JOSAA (JEE MAINS & ADVANCED) PLUGINS ---
+from ingestion.cutoff_ingestion.plugins.josaa.plugin import JosaaPlugin
 
 class PluginFactory:
     """
@@ -27,7 +30,10 @@ class PluginFactory:
         # MH Medical Hooks
         "mh_neet_ug": MHNeetUGPlugin,
         "mh_nursing": MHNursingPlugin,
-        "mh_ayush_aiq": MHNeetAyushAiqPlugin
+        "mh_ayush_aiq": MHNeetAyushAiqPlugin,
+        
+        # JoSAA (JEE) Hooks
+        "josaa": JosaaPlugin
     }
 
     @classmethod

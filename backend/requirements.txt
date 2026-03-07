@@ -33,3 +33,9 @@ passlib[argon2]==1.7.4
 python-jose[cryptography]==3.3.0
 
 email-validator==2.1.0
+
+lxml==5.1.0
+
+# --- S3 & Binary IO ---
+boto3>=1.34.0
+python-magic>=0.4.27

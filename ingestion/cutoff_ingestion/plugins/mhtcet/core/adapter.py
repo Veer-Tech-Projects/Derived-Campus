@@ -18,7 +18,7 @@ class MHTCETContextAdapter(ContextAdapter):
     def __init__(self, exam_slug: str):
         self.exam_slug = exam_slug.upper()
 
-    def get_exam_code(self) -> str:
+    def get_exam_code(self, row: Dict[str, Any] = None) -> str:
         return self.exam_slug
 
     def get_state_code(self, row: Dict[str, Any]) -> Optional[str]:

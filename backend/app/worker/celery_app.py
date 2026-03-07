@@ -49,6 +49,9 @@ celery_app.conf.beat_schedule = {
     },
 }
 
-celery_app.autodiscover_tasks(["ingestion"])
+celery_app.autodiscover_tasks([
+    "ingestion", 
+    "ingestion.media_ingestion"
+])
 
 logger = logging.getLogger(__name__)

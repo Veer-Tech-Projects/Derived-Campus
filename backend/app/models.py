@@ -3,7 +3,7 @@ import enum
 from sqlalchemy import (
     Column, Integer, String, Boolean, Numeric, DateTime, Text, Index, UniqueConstraint, BigInteger, ForeignKey, CheckConstraint,Enum as SqEnum
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID, insert
 from sqlalchemy.sql import func, text
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -40,6 +40,7 @@ class College(Base):
     __table_args__ = (
         UniqueConstraint('normalized_name', name='uq_college_normalized_name'),
         Index('idx_college_normalized', 'normalized_name'), 
+        Index('idx_college_pagination', 'canonical_name', 'college_id'),
     )
 
 class CollegeAlias(Base):
@@ -154,6 +155,26 @@ class MhtcetCollegeMetadata(Base):
         Index('idx_mhtcet_code_lookup', 'dte_code', 'year'),
         Index('idx_mhtcet_college_id', 'college_id'),
     )
+
+
+class JosaaCollegeMetadata(Base):
+    __tablename__ = "josaa_college_metadata"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    college_id = Column(UUID(as_uuid=True), ForeignKey("college_registry.college_id"), nullable=False)
+    
+    institute_name_raw = Column(Text, nullable=False)
+    institute_type = Column(String(32), nullable=False) # 'IIT', 'NIT', 'IIIT', 'GFTI'
+    exam_code = Column(String(32), nullable=False)      # 'JEE_ADV', 'JEE_MAIN'
+    year = Column(Integer, nullable=False)
+    source_artifact_id = Column(UUID(as_uuid=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint('college_id', 'institute_name_raw', 'year', name='uq_josaa_metadata_identity'),
+        Index('idx_josaa_name_lookup', 'institute_name_raw', 'year'),
+        Index('idx_josaa_college_id', 'college_id'),
+    )
+
 
 # --- PILLAR 1: CANONICAL FACT STORAGE (UPDATED) ---
 
@@ -468,3 +489,115 @@ class AdminAuditTrail(Base):
     __table_args__ = (
         Index("idx_admin_audit_admin_created", "admin_id", "created_at"),
     )
+
+
+# --- MEDIA PIPELINE ENUMS ---
+class MediaTypeEnum(str, enum.Enum):
+    LOGO = "LOGO"
+    CAMPUS_HERO = "CAMPUS_HERO"
+
+class MediaStatusEnum(str, enum.Enum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+
+# --- MEDIA SOT MODEL ---
+class CollegeMedia(Base):
+    __tablename__ = "college_media"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    # Cascade deletion: No orphan media if a college is destroyed
+    college_id = Column(
+        UUID(as_uuid=True), 
+        ForeignKey("college_registry.college_id", ondelete="CASCADE"), 
+        nullable=False, 
+        index=True
+    )
+    
+    # Native PostgreSQL Enums (Set create_type=False since they exist)
+    media_type = Column(SqEnum(MediaTypeEnum, name="media_type_enum", create_type=False), nullable=False)
+    status = Column(SqEnum(MediaStatusEnum, name="media_status_enum", create_type=False), nullable=False)
+    
+    source_url = Column(Text, nullable=False)
+    storage_key = Column(String, nullable=False, index=True)
+    
+    # The Idempotency Anchor
+    content_hash = Column(String(64), nullable=False, index=True) 
+    
+    # File Validation Metadata
+    file_size_bytes = Column(Integer, nullable=False)
+    width = Column(Integer, nullable=True)
+    height = Column(Integer, nullable=True)
+    
+    # Operational Audit Timestamp
+    ingested_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        # 1. Active State Constraint (Existing)
+        Index(
+            "uq_active_college_media",
+            "college_id",
+            "media_type",
+            unique=True,
+            postgresql_where=text("status = 'ACCEPTED'")
+        ),
+        
+        # 2. Pipeline State Lock (NEW: Ensures only 1 PENDING record exists per media type)
+        Index(
+            "uq_pending_college_media",
+            "college_id",
+            "media_type",
+            unique=True,
+            postgresql_where=text("status = 'PENDING'")
+        ),
+        
+        # 3. Cryptographic Storage Idempotency (NEW: Prevents duplicate bytes per college)
+        UniqueConstraint(
+            "college_id", 
+            "content_hash", 
+            name="uq_college_content_hash"
+        ),
+        
+        # 4. Idempotency Composite Index (Existing: Fast Hash Lookups)
+        Index(
+            "idx_college_media_hash_lookup", 
+            "college_id", 
+            "content_hash"
+        ),
+
+        Index("idx_media_lateral_fetch", "college_id", "media_type", ingested_at.desc()),
+    )
+
+
+# --- PHASE 8: MEDIA GOVERNANCE CONTROL PLANE ---
+
+class MediaDispatchLock(Base):
+    """
+    Distributed API Idempotency Lock.
+    Prevents duplicate Celery dispatch under concurrent Admin operations.
+    """
+    __tablename__ = "media_dispatch_locks"
+
+    college_id = Column(UUID(as_uuid=True), ForeignKey("college_registry.college_id", ondelete="CASCADE"), primary_key=True)
+    media_type = Column(String(32), primary_key=True) 
+    
+    locked_by = Column(String(128), nullable=False) 
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class MediaIngestionTracker(Base):
+    """
+    Semantic Exhaustion Tracker.
+    Prevents infinite loops and API burn on rural/missing colleges.
+    """
+    __tablename__ = "media_ingestion_tracker"
+
+    # The composite primary key automatically creates the necessary unique index
+    college_id = Column(UUID(as_uuid=True), ForeignKey("college_registry.college_id", ondelete="CASCADE"), primary_key=True)
+    media_type = Column(String(32), primary_key=True)
+    
+    attempt_count = Column(Integer, server_default=text("0"), nullable=False)
+    last_attempted_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    is_exhausted = Column(Boolean, server_default=text("false"), nullable=False)

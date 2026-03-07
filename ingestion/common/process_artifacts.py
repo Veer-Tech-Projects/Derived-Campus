@@ -27,7 +27,7 @@ class ArtifactProcessor:
         self.registry = RegistryService()
         self.context_manager = ContextManager(self.registry)
         
-        self.temp_dir = "./temp_downloads"
+        self.temp_dir = "/src/temp_downloads"
         os.makedirs(self.temp_dir, exist_ok=True)
         self.BATCH_SIZE = 1000
 
@@ -215,6 +215,28 @@ class ArtifactProcessor:
                 stats['quarantined'] += 1
                 return
 
+            # --- [ENTERPRISE FIX]: Bulletproof Rank Extraction ---
+            def _extract_rank(key: str) -> int | None:
+                # 1. Prefer the plugin's cleaned context, fallback to raw HTML row
+                val = context_input.get(key)
+                if val is None:
+                    val = row.get(key)
+                
+                if val is None:
+                    return None
+                    
+                # 2. If the plugin already successfully cast it to an integer, use it.
+                if isinstance(val, int):
+                    return val
+                    
+                # 3. Aggressive String Cleansing (Catches '75P', '12,345', 'NA', '-', '45.5')
+                clean_val = str(val).strip().upper().replace("P", "").replace(",", "")
+                try:
+                    return int(float(clean_val))
+                except ValueError:
+                    return None
+            # -----------------------------------------------------
+
             # 3. Success -> Add to Outcome Buffer
             outcome_buf.append({
                 "college_id": resolved.college_id,
@@ -227,7 +249,8 @@ class ArtifactProcessor:
                 "program_code": resolved.program_code,
                 "program_name": resolved.program_name,
                 "seat_bucket_code": resolved.seat_bucket_code,
-                "closing_rank": int(float(row['cutoff_rank'])),
+                "opening_rank": _extract_rank('opening_rank'),
+                "closing_rank": _extract_rank('cutoff_rank'),
                 "cutoff_percentile": row.get('cutoff_percentile'),
                 "source_authority": resolved.exam_code,
                 "created_by": "universal_etl",

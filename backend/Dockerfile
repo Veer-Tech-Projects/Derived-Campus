@@ -2,17 +2,17 @@ FROM python:3.12-slim
 
 WORKDIR /src
 
-# --- CRITICAL CHANGE: SKIP OS UPDATES ---
-# We removed 'apt-get update' because it hangs on mobile hotspots.
-# Your requirements.txt uses 'psycopg2-binary', so we don't need
-# gcc or libpq-dev installed at the system level.
-# ----------------------------------------
+# --- C-LEVEL IO DEPENDENCIES ---
+# libmagic1 is strictly required for binary MIME signature validation
+RUN apt-get update && apt-get install -y \
+    libmagic1 \
+    && rm -rf /var/lib/apt/lists/*
+# -------------------------------
 
 # Copy requirements
 COPY backend/requirements.txt .
 
 # Install Python dependencies
-# We use a long timeout (1000s) to be patient with your hotspot
 RUN pip install --no-cache-dir --timeout=1000 --retries=10 -r requirements.txt
 
 # Copy source code

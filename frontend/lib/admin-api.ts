@@ -35,6 +35,7 @@ export interface DashboardStats {
   triage_pending: number;
   registry_total: number;
   seat_policy_pending: number;
+  media_pending: number;
 }
 
 export interface ExamConfig {

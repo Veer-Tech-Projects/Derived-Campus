@@ -7,7 +7,7 @@ from app.models import KCETCollegeMetadata
 from ingestion.common.interface.context_interface import ContextAdapter
 
 class KCETContextAdapter(ContextAdapter):
-    def get_exam_code(self) -> str:
+    def get_exam_code(self, row: Dict[str, Any] = None) -> str:
         return "KCET"
 
     def get_state_code(self, row: Dict[str, Any]) -> Optional[str]:

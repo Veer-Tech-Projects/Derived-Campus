@@ -5,7 +5,11 @@ from pydantic import BaseModel
 from typing import Literal
 
 from app.database import SessionLocal 
-from app.models import ExamConfiguration, DiscoveredArtifact, CollegeCandidate, College, SeatPolicyQuarantine, AdminRole
+from app.models import (
+    ExamConfiguration, DiscoveredArtifact, CollegeCandidate, 
+    College, SeatPolicyQuarantine, AdminRole,
+    CollegeMedia, MediaStatusEnum  # <--- NEW: Phase 4 Imports
+)
 # [UPDATE] Import Enforcer
 from app.domains.admin_auth.services.auth_dependency import get_current_admin, require_role
 
@@ -27,12 +31,18 @@ def get_stats(db: Session = Depends(get_sync_db)):
     triage_count = db.query(func.count(CollegeCandidate.candidate_id)).filter(CollegeCandidate.status == 'pending').scalar() or 0
     registry_count = db.query(func.count(College.college_id)).scalar() or 0
     seat_policy_count = db.query(func.count(SeatPolicyQuarantine.id)).filter(SeatPolicyQuarantine.status == 'OPEN').scalar() or 0
+    
+    # --- NEW INJECTION: Phase 4 Media Governance Metric ---
+    media_pending_count = db.query(func.count(CollegeMedia.id)).filter(
+        CollegeMedia.status == MediaStatusEnum.PENDING
+    ).scalar() or 0
 
     return {
         "airlock_pending": airlock_count,
         "triage_pending": triage_count,
         "registry_total": registry_count,
-        "seat_policy_pending": seat_policy_count
+        "seat_policy_pending": seat_policy_count,
+        "media_pending": media_pending_count # <--- ADDED METRIC
     }
 
 @router.get("/exams")

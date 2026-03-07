@@ -1,7 +1,7 @@
 import logging
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from typing import List
+from typing import List, Optional
 
 from ingestion.cutoff_ingestion.core.base_scanner import BaseScanner, ScannedArtifact
 from ingestion.cutoff_ingestion.plugins.neet.states.mh.core import constants as M
@@ -9,7 +9,7 @@ from ingestion.cutoff_ingestion.plugins.neet.states.mh.core import constants as 
 logger = logging.getLogger(__name__)
 
 class MHNeetScanner(BaseScanner):
-    def extract_artifacts(self, html_content: bytes, base_url: str) -> List[ScannedArtifact]:
+    def extract_artifacts(self, html_content: bytes, base_url: str, year: Optional[int] = None) -> List[ScannedArtifact]:
         soup = BeautifulSoup(html_content, 'html.parser')
         artifacts = []
         seen_urls = set()

@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List
 from dataclasses import dataclass
+from typing import List, Optional
 
 @dataclass
 class ScannedArtifact:
@@ -19,9 +20,10 @@ class BaseScanner(ABC):
     Decouples 'Parsing' from 'Orchestration'.
     """
     @abstractmethod
-    def extract_artifacts(self, html_content: bytes, base_url: str) -> List[ScannedArtifact]:
+    def extract_artifacts(self, html_content: bytes, base_url: str, year: Optional[int] = None) -> List[ScannedArtifact]:
         """
-        Parses HTML and returns a list of VALID PDF artifacts.
-        Must handle structural logic, filtering, and strict round detection.
+        Extracts metadata and forms standard artifacts.
+        :param year: The specific exam year being processed.
         """
-        pass
+        raise NotImplementedError
+

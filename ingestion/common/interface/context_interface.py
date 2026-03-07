@@ -38,7 +38,7 @@ class ContextAdapter(ABC):
     """
     
     @abstractmethod
-    def get_exam_code(self) -> str:
+    def get_exam_code(self, row: Dict[str, Any] = None) -> str:
         pass
 
     @abstractmethod

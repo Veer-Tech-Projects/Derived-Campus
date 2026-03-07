@@ -58,7 +58,7 @@ class ContextManager:
              raise PolicyViolationError(str(e)) # Convert to Quarantine Event
 
         # 3. Governance
-        self._ensure_taxonomy(db, slug, adapter.get_exam_code(), policy_attrs, mode)
+        self._ensure_taxonomy(db, slug, adapter.get_exam_code(row_data), policy_attrs, mode)
 
         # 4. Metadata
         adapter.upsert_exam_metadata(db, identity_result.college_id, row_data)
@@ -69,7 +69,7 @@ class ContextManager:
         return ResolvedContext(
             college_id=identity_result.college_id,
             seat_bucket_code=slug,
-            exam_code=adapter.get_exam_code(),
+            exam_code=adapter.get_exam_code(row_data),
             year=row_data['year'],
             round=valid_round, 
             state_code=adapter.get_state_code(row_data),

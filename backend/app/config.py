@@ -17,6 +17,15 @@ class Settings(BaseSettings):
     REDIS_PORT: int
     REDIS_PASSWORD: Optional[str] = None
 
+    # S3 / MinIO
+    S3_ENDPOINT_URL: str
+    S3_ACCESS_KEY: str
+    S3_SECRET_KEY: str
+    S3_BUCKET_NAME: str
+
+    GOOGLE_SEARCH_API_KEY: str
+    GOOGLE_SEARCH_CX: str
+
     @computed_field
     @property
     def DATABASE_URL(self) -> str:

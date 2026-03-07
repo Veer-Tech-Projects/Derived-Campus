@@ -13,7 +13,7 @@ class KarnatakaNEETScanner(BaseScanner):
     def __init__(self, plugin):
         self.plugin = plugin
 
-    def extract_artifacts(self, html_content: bytes, base_url: str) -> List[ScannedArtifact]:
+    def extract_artifacts(self, html_content: bytes, base_url: str, year: Optional[int] = None) -> List[ScannedArtifact]:
         """
         Architectural Pivot: Link-Centric Scanning.
         We scan ALL PDF links globally to ignore DOM structural drift.

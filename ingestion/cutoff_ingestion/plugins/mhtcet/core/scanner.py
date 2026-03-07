@@ -3,7 +3,7 @@ import json
 import logging
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-
+from typing import Optional
 from ingestion.cutoff_ingestion.core.base_scanner import BaseScanner, ScannedArtifact
 from ingestion.cutoff_ingestion.plugins.mhtcet.core import constants as M
 
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class MHTCETScanner(BaseScanner):
     
-    def extract_artifacts(self, html_content: bytes, base_url: str) -> list[ScannedArtifact]:
+    def extract_artifacts(self, html_content: bytes, base_url: str, year: Optional[int] = None) -> list[ScannedArtifact]:
         soup = BeautifulSoup(html_content, 'html.parser')
         artifacts = []
         seen_urls = set()

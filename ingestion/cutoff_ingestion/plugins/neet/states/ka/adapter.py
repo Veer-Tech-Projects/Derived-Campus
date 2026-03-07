@@ -6,7 +6,7 @@ from ingestion.common.interface.context_interface import ContextAdapter
 from ingestion.cutoff_ingestion.plugins.neet.states.ka.row_standardizer import KarnatakaNEETRowStandardizer
 
 class KarnatakaNEETContextAdapter(ContextAdapter):
-    def get_exam_code(self) -> str: return "NEET_KA"
+    def get_exam_code(self, row: Dict[str, Any] = None) -> str: return "NEET_KA"
     def get_state_code(self, row: Dict[str, Any]) -> Optional[str]: return "KA"
 
     def resolve_round(self, row: Dict[str, Any]) -> int:
