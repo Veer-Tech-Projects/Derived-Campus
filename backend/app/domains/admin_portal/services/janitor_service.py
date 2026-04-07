@@ -1,12 +1,14 @@
 import uuid
 import logging
 from sqlalchemy.orm import Session
-from sqlalchemy import delete
+from sqlalchemy import delete, and_
 from app.models import (
     CutoffOutcome, 
     CollegeCandidate, 
     SeatPolicyQuarantine, 
-    KCETCollegeMetadata
+    KCETCollegeMetadata,
+    ExamCourseTypeCandidate, # [NEW]
+    ExamBranchCandidate      # [NEW]
 )
 
 logger = logging.getLogger("JanitorService")
@@ -28,7 +30,7 @@ class JanitorService:
                 delete(CutoffOutcome).where(CutoffOutcome.source_document == artifact_uuid)
             ).rowcount
             
-            deleted_candidates = db.execute(
+            deleted_colleges = db.execute(
                 delete(CollegeCandidate)
                 .where(CollegeCandidate.source_document == artifact_uuid)
                 .where(CollegeCandidate.status == 'pending')
@@ -36,6 +38,27 @@ class JanitorService:
 
             deleted_quarantine = db.execute(
                 delete(SeatPolicyQuarantine).where(SeatPolicyQuarantine.source_file == artifact_uuid)
+            ).rowcount
+
+            # [NEW] Taxonomy Airlock Wipe (Only PENDING, preserve REJECTED suppression lists)
+            deleted_courses = db.execute(
+                delete(ExamCourseTypeCandidate)
+                .where(
+                    and_(
+                        ExamCourseTypeCandidate.source_artifact_id == artifact_id,
+                        ExamCourseTypeCandidate.status == 'PENDING'
+                    )
+                )
+            ).rowcount
+
+            deleted_branches = db.execute(
+                delete(ExamBranchCandidate)
+                .where(
+                    and_(
+                        ExamBranchCandidate.source_artifact_id == artifact_id,
+                        ExamBranchCandidate.status == 'PENDING'
+                    )
+                )
             ).rowcount
 
             # 2. Selective Tables
@@ -50,8 +73,8 @@ class JanitorService:
             
             logger.info(
                 f"✅ JANITOR REPORT: Wiped {deleted_outcomes} outcomes, "
-                f"{deleted_candidates} candidates, {deleted_quarantine} violations, "
-                f"{deleted_meta} metadata rows."
+                f"{deleted_quarantine} violations, {deleted_meta} metadata rows. "
+                f"Airlocks cleared: {deleted_colleges} colleges, {deleted_courses} courses, {deleted_branches} branches."
             )
 
         except Exception as e:

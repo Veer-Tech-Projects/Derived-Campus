@@ -41,7 +41,11 @@ class KCETContextAdapter(ContextAdapter):
         }
 
     # --- FINAL HYBRID LOGIC FOR COURSE CODES ---
-    def resolve_descriptive_attributes(self, row: Dict[str, Any]) -> Dict[str, str]:
+    def resolve_descriptive_attributes(
+        self,
+        row: Dict[str, Any],
+        college_id: Optional[Any] = None
+    ) -> Dict[str, str]:
         # 1. Get raw values
         p_code = row.get('course_code_raw')
         p_name = row.get('course_name_raw', 'UNKNOWN')
@@ -87,7 +91,7 @@ class KCETContextAdapter(ContextAdapter):
         if raw.startswith("GM"): return "GM"
         if raw.startswith("SC"): return "SC"
         if raw.startswith("ST"): return "ST"
-        if raw.startswith("1"): return "CAT-1"
+        #if raw.startswith("1"): return "CAT-1"
         if raw.startswith("2A"): return "2A"
         if raw.startswith("2B"): return "2B"
         if raw.startswith("3A"): return "3A"

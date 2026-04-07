@@ -45,17 +45,26 @@ class MHNeetContextAdapter(ContextAdapter):
         return {
             "is_reserved": MHNeetRowStandardizer.is_reserved(row.get('category_normalized', '')),
             "category_group": row.get('category_normalized', 'OPEN'),
-            "course_type": row['exam_code'],
+            "course_type": row["specific_course_type"],
             "location_type": row.get('quota_normalized', 'STATE'),
             "reservation_type": row.get('gender_normalized', 'General'),
             "extra_attributes": {
-                "normalized_quota": row.get('quota_normalized')
+                "normalized_quota": row.get('quota_normalized'),
+                "document_course_group": row.get("document_course_group"),
             }
         }
 
-    def resolve_descriptive_attributes(self, row: Dict[str, Any]) -> Dict[str, str]:
+    def resolve_descriptive_attributes(
+        self,
+        row: Dict[str, Any],
+        college_id: Optional[Any] = None
+    ) -> Dict[str, str]:
         # [ENTERPRISE FIX]: Uses the newly injected 'program_code', defaults to exam_code if missing
-        prog_code = str(row.get('program_code')) if row.get('program_code') and row.get('program_code') != 'UNKNOWN_COURSE' else str(row.get('exam_code', 'UNKNOWN'))
+        prog_code = str(
+            row.get("program_code")
+            or row.get("specific_course_type")
+            or row.get("exam_code", "UNKNOWN")
+        )
         
         return {
             "institute_code": str(row.get('institute_code', 'UNKNOWN')),
@@ -73,7 +82,7 @@ class MHNeetContextAdapter(ContextAdapter):
             college_id=college_id,
             dte_code=str(row['institute_code']),
             dte_name_raw=str(row['institute_name']),
-            course_type=str(row['exam_code']),
+            course_type=str(row["specific_course_type"]),
             year=int(row['year']),
             source_artifact_id=clean_source_id
         ).on_conflict_do_update(

@@ -1,11 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { fetchRegistry, RegistryCollege, updateCanonicalName } from "@/lib/admin-api";
-import { Building2, ChevronRight, ChevronDown, ArrowUpCircle, CornerDownRight, AlertTriangle } from "lucide-react";
+import React, { useEffect, useState, useMemo, useCallback } from "react";
+import { 
+  fetchRegistry, RegistryCollege, updateCanonicalName,
+  fetchBranchRegistry, fetchCourseTypeRegistry, TaxonomyRegistryItem,
+  promoteBranchAlias, promoteCourseTypeAlias,
+  fetchExamConfigs, ExamConfig
+} from "@/lib/admin-api";
+import { Building2, ChevronRight, ChevronDown, ArrowUpCircle, CornerDownRight, Network, BookOpen, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -14,14 +18,33 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { useAuth } from "@/components/providers/auth-provider"; // <--- Auth
+import { useAuth } from "@/components/providers/auth-provider"; 
+import { toast } from "sonner";
 
-export default function RegistryPage() {
-  const { hasRole } = useAuth(); // <--- Auth Hook
-  const [colleges, setColleges] = useState<RegistryCollege[]>([]);
-  const [filtered, setFiltered] = useState<RegistryCollege[]>([]);
+type RegistryTab = "COLLEGES" | "BRANCHES" | "COURSES";
+
+interface UnifiedRegistryItem {
+  id: string;
+  primary_name: string;
+  subtitle: string; 
+  aliases: string[];
+}
+
+export default function MasterRegistryPage() {
+  const { hasRole } = useAuth(); 
+  const canEdit = hasRole("EDITOR");
+
+  const [activeTab, setActiveTab] = useState<RegistryTab>("COLLEGES");
+  
+  const [exams, setExams] = useState<ExamConfig[]>([]);
+  const [examCode, setExamCode] = useState<string>("");
+
+  const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  const [colleges, setColleges] = useState<RegistryCollege[]>([]);
+  const [taxonomyData, setTaxonomyData] = useState<TaxonomyRegistryItem[]>([]);
 
   const [promoteTarget, setPromoteTarget] = useState<{
     id: string;
@@ -29,180 +52,290 @@ export default function RegistryPage() {
     aliasToPromote: string;
   } | null>(null);
 
-  const canEdit = hasRole("EDITOR");
+  useEffect(() => {
+    const initExams = async () => {
+      try {
+        const examData = await fetchExamConfigs();
+        setExams(examData);
+        if (examData.length > 0) {
+          setExamCode(examData[0].exam_code);
+        }
+      } catch (e) {
+        toast.error("Failed to load exam configurations");
+      }
+    };
+    initExams();
+  }, []);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
+    setIsLoading(true);
     try {
-      const data = await fetchRegistry();
-      setColleges(data);
-      setFiltered(data);
-    } catch (e) { console.error(e); }
-  };
-
-  useEffect(() => { loadData(); }, []);
+      if (activeTab === "COLLEGES") {
+        const data = await fetchRegistry();
+        setColleges(data);
+      } else if (activeTab === "BRANCHES" && examCode) {
+        const data = await fetchBranchRegistry(examCode);
+        setTaxonomyData(data);
+      } else if (activeTab === "COURSES" && examCode) {
+        const data = await fetchCourseTypeRegistry(examCode);
+        setTaxonomyData(data);
+      }
+    } catch (e) { 
+      toast.error("Failed to load registry data.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [activeTab, examCode]);
 
   useEffect(() => {
-    const term = search.toLowerCase();
-    setFiltered(colleges.filter(c => 
-      c.canonical_name.toLowerCase().includes(term) || 
-      c.aliases.some(a => a.toLowerCase().includes(term))
-    ));
-  }, [search, colleges]);
+    loadData();
+    setExpanded(new Set());
+    setSearch("");
+  }, [loadData, activeTab, examCode]);
 
-  const toggleRow = (id: string) => {
+  const unifiedData: UnifiedRegistryItem[] = useMemo(() => {
+    if (activeTab === "COLLEGES") {
+      return colleges.map(c => ({
+        id: c.college_id,
+        primary_name: c.canonical_name,
+        subtitle: c.state_code || 'Unknown',
+        aliases: c.aliases || []
+      }));
+    } else {
+      return taxonomyData.map(t => ({
+        id: t.id,
+        primary_name: t.name,
+        subtitle: examCode.toUpperCase(),
+        aliases: t.aliases || []
+      }));
+    }
+  }, [activeTab, colleges, taxonomyData, examCode]);
+
+  const filteredData = useMemo(() => {
+    if (!search) return unifiedData;
+    return unifiedData.filter(item => 
+      item.primary_name.toLowerCase().includes(search.toLowerCase()) || 
+      item.aliases.some(a => a.toLowerCase().includes(search.toLowerCase()))
+    );
+  }, [unifiedData, search]);
+
+  const toggleExpand = (id: string) => {
     const next = new Set(expanded);
     if (next.has(id)) next.delete(id);
     else next.add(id);
     setExpanded(next);
   };
 
-  const requestPromotion = (college: RegistryCollege, alias: string) => {
-    setPromoteTarget({
-      id: college.college_id,
-      currentName: college.canonical_name,
-      aliasToPromote: alias
-    });
-  };
-
+  // [NEW] Dynamic execution router based on active tab
   const executePromotion = async () => {
     if (!promoteTarget) return;
     try {
-      await updateCanonicalName(promoteTarget.id, promoteTarget.aliasToPromote);
+      if (activeTab === "COLLEGES") {
+        await updateCanonicalName(promoteTarget.id, promoteTarget.aliasToPromote);
+      } else if (activeTab === "BRANCHES") {
+        await promoteBranchAlias(promoteTarget.id, promoteTarget.aliasToPromote);
+      } else if (activeTab === "COURSES") {
+        await promoteCourseTypeAlias(promoteTarget.id, promoteTarget.aliasToPromote);
+      }
+      toast.success("Alias promoted to Canonical successfully.");
       setPromoteTarget(null);
       loadData();
-    } catch (e) { alert("Promotion Failed"); }
+    } catch (e: any) {
+      toast.error(e.response?.data?.detail || "Promotion failed.");
+    }
+  };
+
+  const getEntityIcon = (id: string) => {
+    const isExpanded = expanded.has(id);
+    if (activeTab === "COLLEGES") return <Building2 className="w-5 h-5 text-indigo-600" />;
+    if (activeTab === "BRANCHES") return <Network className="w-5 h-5 text-indigo-600" />;
+    return <BookOpen className="w-5 h-5 text-indigo-600" />;
   };
 
   return (
-    <div className="p-8 max-w-7xl mx-auto space-y-6 bg-slate-50/50 min-h-screen">
-      <div className="flex justify-between items-center pb-4 border-b border-slate-200">
+    <div className="p-8 max-w-7xl mx-auto space-y-6">
+      
+      {/* Header aligned with your screenshot */}
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center pb-4 border-b border-slate-200 gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-slate-900">Master Registry</h1>
-          <p className="text-slate-500 mt-1">Hierarchy of Official Names and their known Aliases.</p>
+          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Master Registry</h1>
+          <p className="text-slate-500 mt-1 text-sm">Hierarchy of Official Names and their known Aliases.</p>
         </div>
-        <div className="w-72">
-          <Input 
-            placeholder="Search colleges or aliases..." 
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="bg-white"
-          />
+
+        <div className="flex items-center gap-4">
+          {/* Tab Switcher */}
+          <div className="flex bg-slate-100 p-1 rounded-lg">
+            <button 
+              onClick={() => setActiveTab("COLLEGES")}
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${activeTab === "COLLEGES" ? "bg-white shadow-sm text-slate-900" : "text-slate-500 hover:text-slate-700"}`}
+            >
+              Colleges
+            </button>
+            <button 
+              onClick={() => setActiveTab("BRANCHES")}
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${activeTab === "BRANCHES" ? "bg-white shadow-sm text-slate-900" : "text-slate-500 hover:text-slate-700"}`}
+            >
+              Branches
+            </button>
+            <button 
+              onClick={() => setActiveTab("COURSES")}
+              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${activeTab === "COURSES" ? "bg-white shadow-sm text-slate-900" : "text-slate-500 hover:text-slate-700"}`}
+            >
+              Courses
+            </button>
+          </div>
+
+          <div className="relative w-64">
+            <Input 
+              placeholder="Search colleges or aliases..." 
+              className="bg-white border-slate-200 text-sm"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
         </div>
       </div>
 
-      <div className="bg-white border rounded-xl shadow-sm overflow-hidden">
-        <div className="grid grid-cols-12 gap-4 px-6 py-3 bg-slate-50 border-b text-sm font-semibold text-slate-500">
-          <div className="col-span-8">Entity Name</div>
-          <div className="col-span-2">State</div>
-          <div className="col-span-2 text-right">Aliases</div>
+      {activeTab !== "COLLEGES" && (
+        <div className="flex items-center gap-2 bg-slate-50 p-3 rounded-lg border border-slate-200 animate-in fade-in">
+          <span className="text-sm font-semibold text-slate-600">Select Exam Context:</span>
+          <select 
+            value={examCode} 
+            onChange={(e) => setExamCode(e.target.value)}
+            className="p-1.5 border border-slate-300 rounded bg-white focus:ring-2 focus:ring-indigo-500 text-sm font-medium uppercase shadow-sm"
+            disabled={exams.length === 0}
+          >
+            {exams.map(ex => (
+              <option key={ex.exam_code} value={ex.exam_code}>
+                {ex.exam_code.replace('_', ' ')}
+              </option>
+            ))}
+          </select>
         </div>
+      )}
 
-        <div className="divide-y divide-slate-100">
-          {filtered.slice(0, 100).map(c => {
-            const isOpen = expanded.has(c.college_id);
-            const hasAliases = c.aliases.length > 0;
-
-            return (
-              <div key={c.college_id} className="group">
-                {/* PARENT ROW */}
-                <div 
-                  className={`grid grid-cols-12 gap-4 px-6 py-4 items-center cursor-pointer transition-colors
-                    ${isOpen ? 'bg-indigo-50/50' : 'hover:bg-slate-50'}`}
-                  onClick={() => hasAliases && toggleRow(c.college_id)}
-                >
-                  <div className="col-span-8 flex items-center gap-3">
-                    <button 
-                      className={`p-1 rounded hover:bg-slate-200 text-slate-400 ${!hasAliases && 'invisible'}`}
-                      onClick={(e) => { e.stopPropagation(); toggleRow(c.college_id); }}
+      {/* Main Table perfectly matched to screenshot */}
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        {isLoading ? (
+           <div className="p-12 flex justify-center items-center">
+             <Loader2 className="w-8 h-8 text-slate-300 animate-spin" />
+           </div>
+        ) : (
+          <table className="w-full text-sm text-left">
+            <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold text-[13px]">
+              <tr>
+                <th className="px-6 py-4 w-3/5">Entity Name</th>
+                <th className="px-6 py-4 w-1/5">{activeTab === "COLLEGES" ? "State" : "Exam"}</th>
+                <th className="px-6 py-4 w-1/5 text-right">Aliases</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredData.map(item => {
+                const isExpanded = expanded.has(item.id);
+                return (
+                  <React.Fragment key={item.id}>
+                    <tr 
+                      className={`hover:bg-slate-50/50 transition-colors cursor-pointer ${isExpanded ? "bg-slate-50/50" : ""}`}
+                      onClick={() => toggleExpand(item.id)}
                     >
-                      {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                    </button>
-                    
-                    <div className="p-2 bg-white border rounded-lg text-indigo-600 shadow-sm">
-                      <Building2 className="w-5 h-5" />
-                    </div>
-                    
-                    <div>
-                      <div className="font-semibold text-slate-900">{c.canonical_name}</div>
-                      <div className="text-xs text-slate-400 font-mono">{c.college_id.slice(0, 8)}...</div>
-                    </div>
-                  </div>
-
-                  <div className="col-span-2 text-sm text-slate-500">
-                    <Badge variant="outline" className="text-xs font-mono bg-white">{c.state_code}</Badge>
-                  </div>
-
-                  <div className="col-span-2 text-right text-sm text-slate-400 font-medium">
-                    {c.aliases.length} known
-                  </div>
-                </div>
-
-                {/* ALIASES ROWS */}
-                {isOpen && (
-                  <div className="bg-slate-50/50 border-t border-slate-100 shadow-inner">
-                    {c.aliases.map((alias, idx) => (
-                      <div key={idx} className="grid grid-cols-12 gap-4 px-6 py-3 items-center hover:bg-white transition-colors border-b border-slate-100 last:border-0">
-                        <div className="col-span-8 flex items-center gap-3 pl-12">
-                          <CornerDownRight className="w-4 h-4 text-slate-300" />
-                          <span className="text-sm text-slate-600 font-medium">{alias}</span>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-4">
+                          <button className="text-slate-400 hover:text-slate-600">
+                            {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                          </button>
+                          <div className="flex items-center justify-center w-10 h-10 rounded-xl border border-slate-200 bg-white shadow-sm shrink-0">
+                            {getEntityIcon(item.id)}
+                          </div>
+                          <div>
+                            <div className="font-bold text-slate-900 text-sm">{item.primary_name}</div>
+                            <div className="text-[11px] text-slate-400 font-mono mt-0.5">{item.id.substring(0, 8)}...</div>
+                          </div>
                         </div>
-                        
-                        <div className="col-span-4 text-right">
-                          {/* RBAC CHECK */}
-                          {canEdit && (
-                            <Button 
-                              size="sm" variant="ghost" 
-                              className="text-xs text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 h-7"
-                              onClick={() => requestPromotion(c, alias)}
-                            >
-                              <ArrowUpCircle className="w-3 h-3 mr-1.5" />
-                              Make Canonical
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                    {c.aliases.length === 0 && (
-                      <div className="px-6 py-3 pl-14 text-sm text-slate-400 italic">No aliases recorded.</div>
+                      </td>
+                      <td className="px-6 py-4 text-slate-500 font-medium">
+                        {item.subtitle}
+                      </td>
+                      <td className="px-6 py-4 text-right text-slate-500 font-medium">
+                        {item.aliases.length} known
+                      </td>
+                    </tr>
+                    
+                    {isExpanded && item.aliases.length > 0 && (
+                      <tr className="bg-slate-50/50">
+                        <td colSpan={3} className="px-0 py-0 border-t border-slate-100">
+                          <div className="pl-24 pr-6 py-3 space-y-1">
+                            {item.aliases.map((alias, idx) => (
+                              <div key={idx} className="flex items-center justify-between py-2 group">
+                                <div className="flex items-center text-sm font-medium text-slate-600">
+                                  <CornerDownRight className="w-4 h-4 text-slate-300 mr-3" />
+                                  {alias}
+                                </div>
+                                
+                                {/* "Make Canonical" available for ALL tabs if user is EDITOR */}
+                                {canEdit && (
+                                  <Button 
+                                    variant="ghost" 
+                                    size="sm" 
+                                    className="h-8 text-xs font-semibold text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setPromoteTarget({ id: item.id, currentName: item.primary_name, aliasToPromote: alias });
+                                    }}
+                                  >
+                                    <ArrowUpCircle className="w-3.5 h-3.5 mr-1.5" />
+                                    Make Canonical
+                                  </Button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
                     )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+                  </React.Fragment>
+                );
+              })}
+              {filteredData.length === 0 && (
+                <tr>
+                  <td colSpan={3} className="px-6 py-12 text-center text-slate-500 italic">
+                    No registry entities found.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        )}
       </div>
 
+      {/* Unified Promotion Modal */}
       <Dialog open={!!promoteTarget} onOpenChange={(open) => !open && setPromoteTarget(null)}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent>
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-amber-600">
-              <AlertTriangle className="w-5 h-5" /> Confirm Name Change
-            </DialogTitle>
+            <DialogTitle>Confirm Canonical Swap</DialogTitle>
             <DialogDescription className="pt-2 space-y-2" asChild>
-              <div className="text-sm text-muted-foreground">
+              <div className="text-sm text-slate-500">
                 <p>
                   You are about to promote <strong>&quot;{promoteTarget?.aliasToPromote}&quot;</strong> to be the Official Canonical Name.
                 </p>
-                <div className="bg-slate-50 p-3 rounded-md text-sm border border-slate-200">
+                <div className="bg-slate-50 p-3 rounded-md text-sm border border-slate-200 mt-2">
                   <div className="flex justify-between mb-1">
-                    <span className="text-slate-500">New Official Name:</span>
-                    <span className="font-semibold text-emerald-700">{promoteTarget?.aliasToPromote}</span>
+                    <span className="text-slate-500 font-semibold">New Official Name:</span>
+                    <span className="font-bold text-indigo-700">{promoteTarget?.aliasToPromote}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-500">Becomes Alias:</span>
+                    <span className="text-slate-500 font-semibold">Demoted to Alias:</span>
                     <span className="font-medium text-slate-700">{promoteTarget?.currentName}</span>
                   </div>
                 </div>
-                <p className="text-xs text-slate-400 mt-2">
-                  This change will be reflected across all reports and dashboards immediately.
+                <p className="text-[11px] font-semibold text-amber-600 bg-amber-50 p-2 rounded mt-3">
+                  This change propagates instantly across the entire platform.
                 </p>
               </div>
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setPromoteTarget(null)}>Cancel</Button>
-            <Button onClick={executePromotion}>Confirm Promotion</Button>
+            <Button className="bg-indigo-600 hover:bg-indigo-700 text-white" onClick={executePromotion}>Confirm Swap</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

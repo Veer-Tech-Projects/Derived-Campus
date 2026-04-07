@@ -40,3 +40,7 @@ Thumbs.db
 *.log
 logs/
 backend/celerybeat-schedule
+
+# --- 7. Location Pipeline Datasets ---
+# Excluded to prevent repository bloat. Injected dynamically via Dockerfile.
+ingestion/assets/pincodes.json

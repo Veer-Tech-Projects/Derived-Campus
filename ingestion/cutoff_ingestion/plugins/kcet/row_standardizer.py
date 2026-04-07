@@ -12,6 +12,55 @@ class KCETRowStandardizer:
     COURSE_CODE_PATTERN = re.compile(r'^([A-Z0-9]{2,4})$')
 
     @classmethod
+    def resolve_location_type(cls, category: str) -> str:
+        cat_upper = str(category or "").upper().strip()
+
+        if not cat_upper:
+            return "UNKNOWN"
+
+        # GENERAL / Rest of Karnataka
+        if re.fullmatch(r"1[GKR]", cat_upper):
+            return "GEN"
+        if re.fullmatch(r"2A[GKR]", cat_upper):
+            return "GEN"
+        if re.fullmatch(r"2B[GKR]", cat_upper):
+            return "GEN"
+        if re.fullmatch(r"3A[GKR]", cat_upper):
+            return "GEN"
+        if re.fullmatch(r"3B[GKR]", cat_upper):
+            return "GEN"
+        if re.fullmatch(r"GM(K|R)?", cat_upper):
+            return "GEN"
+        if re.fullmatch(r"SC[GKR]", cat_upper):
+            return "GEN"
+        if re.fullmatch(r"ST[GKR]", cat_upper):
+            return "GEN"
+
+        # HK / Kalyana Karnataka
+        if re.fullmatch(r"1(H|KH|RH)", cat_upper):
+            return "HK"
+        if re.fullmatch(r"2A(H|KH|RH)", cat_upper):
+            return "HK"
+        if re.fullmatch(r"2B(H|KH|RH)", cat_upper):
+            return "HK"
+        if re.fullmatch(r"3A(H|KH|RH)", cat_upper):
+            return "HK"
+        if re.fullmatch(r"3B(H|KH|RH)", cat_upper):
+            return "HK"
+        if re.fullmatch(r"GM(H|KH|RH|PH)", cat_upper):
+            return "HK"
+        if re.fullmatch(r"SC(H|KH|RH)", cat_upper):
+            return "HK"
+        if re.fullmatch(r"ST(H|KH|RH)", cat_upper):
+            return "HK"
+
+        # Explicit private / special
+        if cat_upper in {"GMP", "OPN", "NRI", "COMED"}:
+            return "PVT"
+
+        return "UNKNOWN"
+
+    @classmethod
     def merge_course_columns(cls, col0: str, col1: str) -> Tuple[Optional[str], str]:
         """
         Resolves Ambiguity (Issue 4):

@@ -36,6 +36,8 @@ export interface DashboardStats {
   registry_total: number;
   seat_policy_pending: number;
   media_pending: number;
+  taxonomy_pending?: number;
+  location_pending: number;
 }
 
 export interface ExamConfig {
@@ -76,6 +78,23 @@ export interface AuditLog {
   details: any;
   ip_address: string | null;
   created_at: string;
+}
+
+// --- TAXONOMY TRIAGE (PHASE 0) ---
+
+export interface TaxonomyCandidate {
+  id: string;
+  exam_code: string;
+  raw_name: string;
+  normalized_name: string;
+  status: string;
+  created_at: string;
+}
+
+export interface TaxonomyRegistryItem {
+  id: string;
+  name: string;
+  aliases: string[];
 }
 
 // --- DOMAIN 1: INGESTION (AIRLOCK) ---
@@ -211,5 +230,69 @@ export const deleteAdmin = async (id: string) => {
 
 export const fetchAuditLogs = async (skip = 0, limit = 100): Promise<AuditLog[]> => {
   const res = await apiClient.get("/admin/audit/", { params: { skip, limit } });
+  return res.data;
+};
+
+
+// Branches (Removed /admin prefix)
+export const fetchBranchQueue = async (examCode: string): Promise<TaxonomyCandidate[]> => {
+  const res = await apiClient.get(`/triage/courses/branches/queue?exam_code=${examCode}`);
+  return res.data;
+};
+export const fetchBranchRegistry = async (examCode: string): Promise<TaxonomyRegistryItem[]> => {
+  const res = await apiClient.get(`/triage/courses/branches/registry?exam_code=${examCode}`);
+  return res.data;
+};
+export const promoteBranch = async (candidateId: string, discipline: string, variant?: string) => {
+  const res = await apiClient.post(`/triage/courses/branches/candidates/${candidateId}/promote`, { discipline, variant: variant || null });
+  return res.data;
+};
+export const linkBranch = async (candidateId: string, targetBranchId: string) => {
+  const res = await apiClient.post(`/triage/courses/branches/candidates/${candidateId}/link`, { target_branch_id: targetBranchId });
+  return res.data;
+};
+export const rejectBranch = async (candidateId: string) => {
+  const res = await apiClient.post(`/triage/courses/branches/candidates/${candidateId}/reject`);
+  return res.data;
+};
+
+// Course Types (Removed /admin prefix)
+export const fetchCourseTypeQueue = async (examCode: string): Promise<TaxonomyCandidate[]> => {
+  const res = await apiClient.get(`/triage/courses/course-types/queue?exam_code=${examCode}`);
+  return res.data;
+};
+export const fetchCourseTypeRegistry = async (examCode: string): Promise<TaxonomyRegistryItem[]> => {
+  const res = await apiClient.get(`/triage/courses/course-types/registry?exam_code=${examCode}`);
+  return res.data;
+};
+export const promoteCourseType = async (candidateId: string, canonicalName: string) => {
+  const res = await apiClient.post(`/triage/courses/course-types/candidates/${candidateId}/promote`, { canonical_name: canonicalName });
+  return res.data;
+};
+export const linkCourseType = async (candidateId: string, targetCourseTypeId: string) => {
+  const res = await apiClient.post(`/triage/courses/course-types/candidates/${candidateId}/link`, { target_course_type_id: targetCourseTypeId });
+  return res.data;
+};
+export const rejectCourseType = async (candidateId: string) => {
+  const res = await apiClient.post(`/triage/courses/course-types/candidates/${candidateId}/reject`);
+  return res.data;
+};
+
+
+// Add these to the very bottom of your admin-api.ts file
+
+export const promoteBranchAlias = async (registryId: string, aliasText: string) => {
+  const res = await apiClient.post(`/triage/courses/branches/promote-alias`, { 
+    registry_id: registryId,
+    alias_text: aliasText
+  });
+  return res.data;
+};
+
+export const promoteCourseTypeAlias = async (registryId: string, aliasText: string) => {
+  const res = await apiClient.post(`/triage/courses/course-types/promote-alias`, { 
+    registry_id: registryId,
+    alias_text: aliasText
+  });
   return res.data;
 };

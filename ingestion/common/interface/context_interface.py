@@ -62,7 +62,11 @@ class ContextAdapter(ABC):
         pass
 
     @abstractmethod
-    def resolve_descriptive_attributes(self, row: Dict[str, Any]) -> Dict[str, str]:
+    def resolve_descriptive_attributes(
+        self,
+        row: Dict[str, Any],
+        college_id: Optional[UUID] = None
+    ) -> Dict[str, str]:
         pass
 
     @abstractmethod

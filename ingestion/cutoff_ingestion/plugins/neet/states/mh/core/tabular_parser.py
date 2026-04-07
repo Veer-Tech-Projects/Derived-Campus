@@ -81,6 +81,10 @@ class MHNeetTabularParser:
         for (c_code, quota, cat, g), max_rank in self.tracker.items():
             c_name = self.names_map.get(c_code, "Unknown")
             c_name = re.sub(r'-{2,}', '', c_name).strip(" -_,") 
+            specific_course_type = MHNeetRowStandardizer.derive_course_type_from_institute_code(c_code)
+            
+            if specific_course_type == "BNYS" and len(c_code) < 4:
+                raise ValueError(f"Invalid MH medical institute_code for BNYS derivation: {c_code}")
             
             yield {
                 "college_name_raw": c_name, 
@@ -94,6 +98,7 @@ class MHNeetTabularParser:
                 "exam_code": self.exam_code,
                 "year": self.metadata.get("year"),
                 "round": self.metadata.get("round", 1),
+                "specific_course_type": specific_course_type,
                 "parser_version": self.PARSER_VERSION
             }
 

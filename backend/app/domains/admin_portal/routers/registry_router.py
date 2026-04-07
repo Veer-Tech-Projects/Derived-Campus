@@ -7,6 +7,14 @@ from app.models import College, CollegeAlias, AdminRole
 from sqlalchemy import select
 # [UPDATE] Import Enforcer
 from app.domains.admin_auth.services.auth_dependency import get_current_admin, require_role
+import logging
+from app.domains.student_portal.college_filter_tool.services.college_filter_rebuild_dispatcher import (
+    CollegeFilterRebuildMode,
+    CollegeFilterRebuildRequest,
+    college_filter_rebuild_dispatcher,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/registry", tags=["Admin Portal: Registry"], dependencies=[Depends(get_current_admin)])
 
@@ -24,15 +32,37 @@ class AliasPromotionRequest(BaseModel):
 # [SECURE] Write Action -> Requires EDITOR
 @router.post("/promote-alias")
 def promote_alias(
-    req: AliasPromotionRequest, 
+    req: AliasPromotionRequest,
     db: Session = Depends(get_sync_db),
-    _ = Depends(require_role(AdminRole.EDITOR)) # <--- Guard
+    admin = Depends(require_role(AdminRole.EDITOR))
 ):
     college = db.query(College).filter(College.college_id == req.college_id).first()
-    if not college: raise HTTPException(404, "College not found")
-        
-    college.canonical_name = req.alias_text
-    db.commit()
+    if not college:
+        raise HTTPException(404, "College not found")
+
+    try:
+        college.canonical_name = req.alias_text
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    try:
+        college_filter_rebuild_dispatcher.dispatch(
+            CollegeFilterRebuildRequest(
+                reason="REGISTRY_ALIAS_PROMOTED_TO_CANONICAL",
+                rebuild_mode=CollegeFilterRebuildMode.READ_MODEL_ONLY,
+                trigger_exam_code=None,
+                created_by=f"admin:{getattr(admin, 'username', 'unknown')}",
+            )
+        )
+    except Exception:
+        logger.exception(
+            "Failed to dispatch college-filter read-model rebuild after registry promote-alias "
+            "college_id=%s",
+            req.college_id,
+        )
+
     return {"status": "updated", "new_name": req.alias_text}
 
 @router.get("/colleges")

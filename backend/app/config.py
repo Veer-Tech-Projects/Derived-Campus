@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     GOOGLE_SEARCH_API_KEY: str
     GOOGLE_SEARCH_CX: str
 
+    CDN_PUBLIC_BASE: str
+
     @computed_field
     @property
     def DATABASE_URL(self) -> str:

@@ -29,13 +29,43 @@ class RegistryService:
     """
     The Identity Authority.
     """
+    JOSAA_SOURCE_TYPES = {"josaa_html", "josaa_pdf", "josaa"}
 
     @staticmethod
-    def normalize_name(name: str) -> str:
-        if not name: return ""
-        name = name.lower().split(',')[0].split('(')[0]
-        name = re.sub(r'[^a-z0-9\s]', '', name)
-        return " ".join(name.split())
+    def normalize_name(name: str, source_type: Optional[str] = None) -> str:
+        if not name:
+            return ""
+
+        raw = str(name).strip().lower()
+        source = str(source_type or "").strip().lower()
+
+        # JoSAA-specific normalization:
+        # preserve the full institute identity; do not truncate at commas/brackets.
+        if source in RegistryService.JOSAA_SOURCE_TYPES:
+            normalized = raw
+
+            if "indian institute of information technology" not in normalized:
+                normalized = re.sub(r"\biiit\b", "indian institute of information technology", normalized)
+
+            if "indian institute of technology" not in normalized:
+                normalized = re.sub(r"\biit\b", "indian institute of technology", normalized)
+
+            if "national institute of technology" not in normalized:
+                normalized = re.sub(r"\bnit\b", "national institute of technology", normalized)
+
+            # Remove bracket characters but preserve enclosed identity text
+            normalized = normalized.replace("(", " ").replace(")", " ")
+
+            # Remove punctuation noise while retaining full institute identity
+            normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+
+            return " ".join(normalized.split())
+
+        # Legacy/default normalization for non-JoSAA sources
+        normalized = raw.split(",")[0].split("(")[0]
+        normalized = re.sub(r"[^a-z0-9\s]", "", normalized)
+        return " ".join(normalized.split())
+
 
     def resolve_identity(
         self, 
@@ -45,7 +75,7 @@ class RegistryService:
         mode: RegistryMode,
         ingestion_run_id: uuid.UUID
     ) -> ResolutionResult:
-        normalized = self.normalize_name(raw_name)
+        normalized = self.normalize_name(raw_name, source_type=source_type)
         if not normalized:
              logger.warning(f"[Run: {ingestion_run_id}] Identity Resolution Failed: Empty Name")
              return ResolutionResult(None, "QUARANTINED", 0.0, "Empty/Invalid Name")
@@ -73,7 +103,16 @@ class RegistryService:
 
     # --- ADMIN ACTIONS ---
     # UPDATED: Removed state_code argument
-    def promote_candidate(self, db: Session, raw_name: str, normalized: str, source_type: str) -> uuid.UUID:
+    def promote_candidate(
+        self,
+        db: Session,
+        raw_name: str,
+        normalized: str,
+        source_type: str,
+        origin_source_type: Optional[str] = None,
+    ) -> uuid.UUID:
+        effective_source_type = origin_source_type or source_type
+        normalized = self.normalize_name(raw_name, source_type=effective_source_type)
         college_stmt = insert(College).values(
             canonical_name=raw_name, 
             normalized_name=normalized, 
@@ -94,7 +133,16 @@ class RegistryService:
         db.execute(alias_stmt)
         return result_id
 
-    def link_alias(self, db: Session, college_id: uuid.UUID, normalized_alias: str, source_type: str):
+    def link_alias(
+        self,
+        db: Session,
+        college_id: uuid.UUID,
+        normalized_alias: str,
+        source_type: str,
+        origin_source_type: Optional[str] = None,
+    ):
+        effective_source_type = origin_source_type or source_type
+        normalized_alias = self.normalize_name(normalized_alias, source_type=effective_source_type)
         stmt = insert(CollegeAlias).values(
             college_id=college_id, alias_name=normalized_alias, source_type=source_type, is_approved=True, confidence_score=1.0
         ).on_conflict_do_nothing()

@@ -8,7 +8,7 @@ import {
 } from "@/lib/admin-api";
 import { 
   FileText, Database, ShieldAlert, Scale,
-  Settings, AlertTriangle, ArrowRight, LogOut, User, Command, Activity, Users, Image, Loader2 
+  Settings, AlertTriangle, ArrowRight, LogOut, User, Command, Activity, Users, Image, Loader2, Network, MapPin 
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -79,7 +79,7 @@ export default function AdminDashboard() {
   };
 
   return (
-    <RoleGuard requiredRole="EDITOR">
+    <RoleGuard requiredRole="VIEWER">
       <div className="min-h-screen bg-[#FAFAFA] selection:bg-indigo-100 selection:text-indigo-900">
         
         {/* --- TOP NAVIGATION BAR --- */}
@@ -144,7 +144,8 @@ export default function AdminDashboard() {
           </section>
 
           {/* --- KPI GRID --- */}
-          <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-5">
+          {/* [UPDATED] 5 columns per row. Remaining items wrap below. */}
+          <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-5">
             
             {/* AIRLOCK CARD */}
             <Link href="/admin/airlock" className="group">
@@ -215,7 +216,53 @@ export default function AdminDashboard() {
               </Card>
             </Link>
 
-            {/* MEDIA GOVERNANCE CARD */}
+            {/* TAXONOMY TRIAGE CARD */}
+            <Link href="/admin/triage/taxonomy" className="group">
+              <Card className="h-full border-zinc-200/60 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden bg-white">
+                <div className="absolute top-0 right-0 p-4 opacity-[0.03] group-hover:opacity-10 transition-opacity">
+                  <Network className="w-24 h-24 text-violet-500 -rotate-12" />
+                </div>
+                <CardHeader className="pb-2">
+                  <div className="w-10 h-10 rounded-lg bg-violet-50 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform duration-300 border border-violet-100">
+                    <Network className="w-5 h-5 text-violet-600" />
+                  </div>
+                  <CardTitle className="text-xs font-bold text-zinc-400 uppercase tracking-widest">Taxonomy Triage</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-3xl font-bold text-zinc-900 tracking-tight h-9 flex items-center">
+                    {renderStat(stats?.taxonomy_pending)} 
+                  </div>
+                  <div className="flex items-center mt-2 text-xs font-semibold text-violet-600 group-hover:translate-x-1 transition-transform">
+                    Unknown Branches <ArrowRight className="w-3 h-3 ml-1" />
+                  </div>
+                </CardContent>
+              </Card>
+            </Link>
+
+            {/* LOCATION GOVERNANCE CARD */}
+            <Link href="/admin/location-governance" className="group">
+              <Card className="h-full border-zinc-200/60 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden bg-white">
+                <div className="absolute top-0 right-0 p-4 opacity-[0.03] group-hover:opacity-10 transition-opacity">
+                  <MapPin className="w-24 h-24 text-teal-500 rotate-12" />
+                </div>
+                <CardHeader className="pb-2">
+                  <div className="w-10 h-10 rounded-lg bg-teal-50 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform duration-300 border border-teal-100">
+                    <MapPin className="w-5 h-5 text-teal-600" />
+                  </div>
+                  <CardTitle className="text-xs font-bold text-zinc-400 uppercase tracking-widest">Location Governance</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-3xl font-bold text-zinc-900 tracking-tight h-9 flex items-center">
+                    {renderStat(stats?.location_pending)}
+                  </div>
+                  <div className="flex items-center mt-2 text-xs font-semibold text-teal-600 group-hover:translate-x-1 transition-transform">
+                    Location Candidates <ArrowRight className="w-3 h-3 ml-1" />
+                  </div>
+                </CardContent>
+              </Card>
+            </Link>
+
+            {/* MEDIA GOVERNANCE CARD (Wraps to bottom row) */}
             <Link href="/admin/media-governance" className="group">
               <Card className="h-full border-zinc-200/60 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden bg-white">
                 <div className="absolute top-0 right-0 p-4 opacity-[0.03] group-hover:opacity-10 transition-opacity">
@@ -238,7 +285,7 @@ export default function AdminDashboard() {
               </Card>
             </Link>
 
-            {/* REGISTRY CARD */}
+            {/* REGISTRY CARD (Wraps to bottom row) */}
             <Link href="/admin/registry" className="group">
               <Card className="h-full border-zinc-200/60 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden bg-white">
                 <div className="absolute top-0 right-0 p-4 opacity-[0.03] group-hover:opacity-10 transition-opacity">
@@ -255,7 +302,7 @@ export default function AdminDashboard() {
                     {renderStat(stats?.registry_total)}
                   </div>
                   <div className="flex items-center mt-2 text-xs font-semibold text-emerald-600 group-hover:translate-x-1 transition-transform">
-                    Official Colleges <ArrowRight className="w-3 h-3 ml-1" />
+                    Official Entities <ArrowRight className="w-3 h-3 ml-1" />
                   </div>
                 </CardContent>
               </Card>

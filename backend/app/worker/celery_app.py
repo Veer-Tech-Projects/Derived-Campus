@@ -51,7 +51,9 @@ celery_app.conf.beat_schedule = {
 
 celery_app.autodiscover_tasks([
     "ingestion", 
-    "ingestion.media_ingestion"
+    "ingestion.media_ingestion",
+    "ingestion.location_pipeline",
+    "app.domains.student_portal.college_filter_tool",
 ])
 
 logger = logging.getLogger(__name__)

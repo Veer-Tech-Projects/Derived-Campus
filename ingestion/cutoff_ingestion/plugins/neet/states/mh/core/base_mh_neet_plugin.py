@@ -109,5 +109,18 @@ class BaseMHNeetPlugin(BaseNEETStatePlugin):
             elif M.P_GROUP_ALLIED.search(artifact_name):
                 course_group = "ALLIED"
                 
-        row['program_code'] = course_group
+        row['document_course_group'] = course_group
+
+        specific_course_type = row.get('specific_course_type')
+        if not specific_course_type:
+            raise ValueError("MH medical row missing specific_course_type after parser aggregation.")
+
+        from ingestion.cutoff_ingestion.plugins.neet.states.mh.core.row_standardizer import MHNeetRowStandardizer
+        MHNeetRowStandardizer.validate_course_type_against_document_group(
+            specific_course_type,
+            course_group,
+        )
+
+        row['program_code'] = specific_course_type
+        row['program_name'] = specific_course_type
         return row

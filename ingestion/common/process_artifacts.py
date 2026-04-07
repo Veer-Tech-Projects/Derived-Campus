@@ -11,15 +11,24 @@ import traceback
 from app.database import SessionLocal
 from app.models import (
     DiscoveredArtifact, CutoffOutcome, SeatPolicyQuarantine, 
-    CollegeCandidate, ExamConfiguration, IngestionRun
+    CollegeCandidate, ExamConfiguration, IngestionRun,
+    ExamCourseTypeCandidate, ExamBranchCandidate
 )
 from app.services.registry_service import RegistryService, RegistryMode
 from app.domains.admin_portal.services.janitor_service import JanitorService
 from ingestion.common.services.context_manager import ContextManager, PolicyViolationError
 from ingestion.common.services.plugin_factory import PluginFactory 
+from ingestion.common.services.taxonomy_cache import TaxonomyCache
+from ingestion.common.services.taxonomy_ingestion_service import TaxonomyIngestionEngine
+from app.domains.student_portal.college_filter_tool.services.college_filter_rebuild_dispatcher import (
+    CollegeFilterRebuildMode,
+    CollegeFilterRebuildRequest,
+    college_filter_rebuild_dispatcher,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Universal_Orchestrator")
+MH_MEDICAL_EXAM_CODES = {"mh_neet_ug", "mh_ayush_aiq", "mh_nursing"}
 
 class ArtifactProcessor:
     def __init__(self, db: Session):
@@ -31,7 +40,11 @@ class ArtifactProcessor:
         os.makedirs(self.temp_dir, exist_ok=True)
         self.BATCH_SIZE = 1000
 
-    def process_approved_artifacts(self, specific_exam: str = None):
+    def process_approved_artifacts(
+        self,
+        specific_exam: str = None,
+        skip_rebuild: bool = False,
+    ):
         """
         Fetches APPROVED artifacts OR those marked for reprocessing.
         """
@@ -49,7 +62,10 @@ class ArtifactProcessor:
 
         logger.info(f"Found {len(artifacts)} artifacts to process.")
         for artifact in artifacts:
-            self._process_single_artifact(artifact)
+            self._process_single_artifact(
+                artifact,
+                skip_rebuild=skip_rebuild,
+            )
 
     def _get_ingestion_mode(self, exam_code: str) -> RegistryMode:
         try:
@@ -65,7 +81,11 @@ class ArtifactProcessor:
         except Exception:
             return RegistryMode.CONTINUOUS
 
-    def _process_single_artifact(self, artifact: DiscoveredArtifact):
+    def _process_single_artifact(
+        self,
+        artifact: DiscoveredArtifact,
+        skip_rebuild: bool = False,
+    ):
         ingestion_run_id = uuid.uuid4()
         local_path = None
         
@@ -91,7 +111,7 @@ class ArtifactProcessor:
             
             logger.info(f"Starting Run {ingestion_run_id} | Exam: {artifact.exam_code} | Mode: {mode}")
 
-            # 2. CONDITIONAL WIPING
+           # 2. CONDITIONAL WIPING
             if mode == RegistryMode.BOOTSTRAP:
                 logger.warning(f"🧹 BOOTSTRAP MODE: Wiping data for artifact {artifact.id}")
                 JanitorService.wipe_artifact(self.db, artifact.id, artifact.exam_code)
@@ -100,7 +120,6 @@ class ArtifactProcessor:
                 logger.info(f"📎 CONTINUOUS MODE: Preparing versioning for {artifact.id}")
                 
                 # 1. Clear previous attempts by THIS SPECIFIC ARTIFACT ONLY.
-                # This ensures idempotency if you re-run the same file multiple times.
                 self.db.execute(delete(CutoffOutcome).where(
                     CutoffOutcome.source_document == str(artifact.id)
                 ))
@@ -112,17 +131,31 @@ class ArtifactProcessor:
                 self.db.execute(delete(CollegeCandidate).where(
                     CollegeCandidate.source_document == str(artifact.id)
                 ))
+
+                self.db.execute(delete(ExamCourseTypeCandidate).where(
+                    and_(
+                        ExamCourseTypeCandidate.source_artifact_id == artifact.id,
+                        ExamCourseTypeCandidate.status == 'PENDING'
+                    )
+                ))
+
+                self.db.execute(delete(ExamBranchCandidate).where(
+                    and_(
+                        ExamBranchCandidate.source_artifact_id == artifact.id,
+                        ExamBranchCandidate.status == 'PENDING'
+                    )
+                ))
+
                 self.db.flush()
 
            # 3. DOWNLOAD & PREPARE
             local_path = self._download_file(artifact.pdf_path, artifact.id, plugin)
             
-            # --- [CRITICAL FIX] DYNAMIC PARSER RESOLUTION ---
+            # --- DYNAMIC PARSER RESOLUTION ---
             if hasattr(plugin, 'get_parser_with_context'):
                 parser = plugin.get_parser_with_context(local_path, artifact)
             else:
                 parser = plugin.get_parser(local_path)
-            # ------------------------------------------------
             
             adapter = plugin.get_adapter()
             sanitized_stream = plugin.sanitize_round_name(artifact.round_name)
@@ -134,13 +167,20 @@ class ArtifactProcessor:
             quarantine_buf = []
             identity_buf = []
 
+            taxonomy_cache = TaxonomyCache(self.db, artifact.exam_code)
+            unknown_branches = set()
+            unknown_courses = set()
+
             # 5. PARSING LOOP
             for row in parser.parse():
                 self._handle_row(
                     row=row, artifact=artifact, run_id=ingestion_run_id, 
                     stats=stats, stream=sanitized_stream, mode=mode, 
                     outcome_buf=outcome_buf, quarantine_buf=quarantine_buf, 
-                    identity_buf=identity_buf, adapter=adapter, plugin=plugin
+                    identity_buf=identity_buf, adapter=adapter, plugin=plugin,
+                    taxonomy_cache=taxonomy_cache,
+                    unknown_branches=unknown_branches,
+                    unknown_courses=unknown_courses
                 )
                 
                 if len(outcome_buf) >= self.BATCH_SIZE: self._flush_outcomes(outcome_buf)
@@ -156,18 +196,85 @@ class ArtifactProcessor:
             self.db.execute(
                 update(DiscoveredArtifact).where(DiscoveredArtifact.id == artifact.id)
                 .values(
-                    status="INGESTED", 
+                    status="INGESTED",
                     review_notes=f"Run {ingestion_run_id}: {stats}",
                     requires_reprocessing=False
                 )
             )
-            
+
             self.db.execute(
                 update(IngestionRun)
                 .where(IngestionRun.run_id == ingestion_run_id)
                 .values(status="COMPLETED", stats=stats, completed_at=func.now())
             )
             self.db.commit()
+
+            # ========================================================
+            # 7. POST-COMMIT COLLEGE-FILTER REBUILD DISPATCH
+            # ========================================================
+            try:
+                if not skip_rebuild:
+                    college_filter_rebuild_dispatcher.dispatch(
+                        CollegeFilterRebuildRequest(
+                            reason="POST_INGEST",
+                            rebuild_mode=CollegeFilterRebuildMode.FULL_STACK,
+                            trigger_exam_code=artifact.exam_code,
+                            created_by="system:artifact_processor",
+                        )
+                    )
+                else:
+                    logger.info(
+                        "Skipped college-filter rebuild dispatch for artifact %s "
+                        "because skip_rebuild=True",
+                        artifact.id,
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to dispatch college-filter rebuild after successful ingest "
+                    "artifact_id=%s exam_code=%s run_id=%s",
+                    artifact.id,
+                    artifact.exam_code,
+                    ingestion_run_id,
+                )
+
+            # ========================================================
+            # 8. TAXONOMY AIRLOCK DISPATCH (Session Isolated, NON-FATAL)
+            # ========================================================
+            try:
+                if unknown_branches or unknown_courses:
+                    with SessionLocal() as taxonomy_db:
+                        if unknown_branches:
+                            logger.info(
+                                "Dispatching %s unknown branches to Airlock.",
+                                len(unknown_branches),
+                            )
+                            TaxonomyIngestionEngine.process_pdf_batch(
+                                taxonomy_db,
+                                artifact.exam_code,
+                                list(unknown_branches),
+                                artifact.id,
+                                "branch",
+                            )
+                        if unknown_courses:
+                            logger.info(
+                                "Dispatching %s unknown courses to Airlock.",
+                                len(unknown_courses),
+                            )
+                            TaxonomyIngestionEngine.process_pdf_batch(
+                                taxonomy_db,
+                                artifact.exam_code,
+                                list(unknown_courses),
+                                artifact.id,
+                                "course_type",
+                            )
+            except Exception:
+                logger.exception(
+                    "Failed to dispatch taxonomy airlock after successful ingest "
+                    "artifact_id=%s exam_code=%s run_id=%s",
+                    artifact.id,
+                    artifact.exam_code,
+                    ingestion_run_id,
+                )
 
         except Exception as e:
             error_msg = str(e)
@@ -191,12 +298,24 @@ class ArtifactProcessor:
         finally:
             if local_path and os.path.exists(local_path): os.remove(local_path)
 
-    def _handle_row(self, row, artifact, run_id, stats, stream, mode, outcome_buf, quarantine_buf, identity_buf, adapter, plugin):
+    def _handle_row(self, row, artifact, run_id, stats, stream, mode, outcome_buf, quarantine_buf, identity_buf, adapter, plugin, taxonomy_cache, unknown_branches, unknown_courses):
         context_input = {}
         try:
             # 1. Enrich Data
             context_input = plugin.transform_row_to_context(row, artifact, stream)
             
+            # [MH MEDICAL ONLY] Course-type discovery must not depend on college identity.
+            # These documents derive a trustworthy course type from institute code, even when
+            # identity is still unresolved. We only pre-dispatch COURSE taxonomy here, never branch.
+            is_mh_medical_exam = str(artifact.exam_code or "").strip().lower() in MH_MEDICAL_EXAM_CODES
+
+            if is_mh_medical_exam:
+                pre_identity_course = TaxonomyIngestionEngine._normalize_string(
+                    context_input.get("specific_course_type")
+                )
+                if pre_identity_course and not taxonomy_cache.is_course_known(pre_identity_course):
+                    unknown_courses.add(pre_identity_course)
+
             # 2. Resolve Context (Identity + Policy Check)
             resolved = self.context_manager.resolve_context(
                 db=self.db, adapter=adapter, row_data=context_input,
@@ -204,9 +323,11 @@ class ArtifactProcessor:
             )
 
             if not resolved:
-                # Identity Failure Case
+                # [AUDIT FIX 1]: Bulletproof Dictionary Extraction
+                raw_col_name = row.get('college_name_raw') or context_input.get('college_name') or "UNKNOWN_COLLEGE"
+                
                 identity_buf.append({
-                    "raw_name": row['college_name_raw'],
+                    "raw_name": raw_col_name,
                     "source_document": str(artifact.id),
                     "reason_flagged": "Identity Resolution Failed",
                     "status": "pending",
@@ -215,9 +336,59 @@ class ArtifactProcessor:
                 stats['quarantined'] += 1
                 return
 
+            # ========================================================
+            # [AUDIT FIX 3]: Defensive protection against missing branch names
+            # ========================================================
+            if not resolved.program_name or not str(resolved.program_name).strip():
+                raise PolicyViolationError("Missing program/branch name after context resolution")
+
+            if not resolved.course_type or not str(resolved.course_type).strip():
+                raise PolicyViolationError("Missing course type after context resolution")
+
+            # ========================================================
+            # [NEW] TAXONOMY GATEKEEPER 
+            # ========================================================
+            norm_branch = TaxonomyIngestionEngine._normalize_string(resolved.program_name)
+            norm_course = TaxonomyIngestionEngine._normalize_string(resolved.course_type)
+
+            # MH medical student-allotment documents do not provide a trustworthy branch dimension.
+            # We still keep program_name/program_code as descriptive fields for outcomes,
+            # but we must not route them into the branch taxonomy airlock.
+            skip_branch_taxonomy = str(artifact.exam_code or "").strip().lower() in MH_MEDICAL_EXAM_CODES
+
+            is_taxonomy_valid = True
+
+            if not skip_branch_taxonomy:
+                if norm_branch and not taxonomy_cache.is_branch_known(norm_branch):
+                    unknown_branches.add(norm_branch)
+                    is_taxonomy_valid = False
+
+            if norm_course and not taxonomy_cache.is_course_known(norm_course):
+                unknown_courses.add(norm_course)
+                is_taxonomy_valid = False
+                
+            if not is_taxonomy_valid:
+                quarantine_buf.append({
+                    "exam_code": artifact.exam_code, 
+                    "seat_bucket_code": resolved.seat_bucket_code,
+                    "violation_type": "UNKNOWN_TAXONOMY", 
+                    "source_exam": artifact.exam_code,
+                    "source_year": artifact.year, 
+                    "source_file": str(artifact.id),
+                    "raw_row": {
+                        "error": "Branch or Course Type not found in Canonical Registry.",
+                        "branch": resolved.program_name,
+                        "course": resolved.course_type
+                    }, 
+                    "ingestion_run_id": run_id, 
+                    "review_notes": "Awaiting Admin Taxonomy Triage"
+                })
+                stats['quarantined'] += 1
+                return
+            # ========================================================
+
             # --- [ENTERPRISE FIX]: Bulletproof Rank Extraction ---
             def _extract_rank(key: str) -> int | None:
-                # 1. Prefer the plugin's cleaned context, fallback to raw HTML row
                 val = context_input.get(key)
                 if val is None:
                     val = row.get(key)
@@ -225,11 +396,9 @@ class ArtifactProcessor:
                 if val is None:
                     return None
                     
-                # 2. If the plugin already successfully cast it to an integer, use it.
                 if isinstance(val, int):
                     return val
                     
-                # 3. Aggressive String Cleansing (Catches '75P', '12,345', 'NA', '-', '45.5')
                 clean_val = str(val).strip().upper().replace("P", "").replace(",", "")
                 try:
                     return int(float(clean_val))
@@ -263,7 +432,6 @@ class ArtifactProcessor:
         except PolicyViolationError as e:
             try:
                 real_slug = adapter.generate_slug(context_input)
-                # Resolve the policy attributes using the ENRICHED context
                 policy_attrs = adapter.resolve_policy_attributes(context_input)
             except Exception:
                 real_slug = "UNKNOWN_ERROR"
@@ -276,9 +444,7 @@ class ArtifactProcessor:
                 "source_exam": artifact.exam_code,
                 "source_year": artifact.year, 
                 "source_file": str(artifact.id),
-                # CRITICAL: We save the policy_attrs here so the Triage Service 
-                # can promote it without needing the original PDF or college info.
-                "raw_row":{"error": str(e), "attributes": policy_attrs}, 
+                "raw_row": {"error": str(e), "attributes": policy_attrs}, 
                 "ingestion_run_id": run_id, 
                 "review_notes": str(e)
             })
@@ -302,7 +468,6 @@ class ArtifactProcessor:
             if unique_key not in unique_map:
                 unique_map[unique_key] = row
             else:
-                # [OBSERVABILITY FIX] Log collisions instead of failing silently!
                 existing_row = unique_map[unique_key]
                 if existing_row['closing_rank'] != row['closing_rank']:
                     logger.error(
@@ -315,10 +480,8 @@ class ArtifactProcessor:
 
         deduped_buffer = list(unique_map.values())
         
-        # 1. Collect keys for update
         keys = [k for k in unique_map.keys()]
 
-        # 2. Set is_latest=False for all matching existing records
         self.db.execute(
             update(CutoffOutcome)
             .where(
@@ -337,7 +500,6 @@ class ArtifactProcessor:
             .values(is_latest=False)
         )
 
-        # 3. Bulk insert the clean, deduplicated batch
         self.db.execute(insert(CutoffOutcome), deduped_buffer)
         buffer.clear()
 
@@ -387,19 +549,15 @@ class ArtifactProcessor:
             raw_content = response.content
             content_type = response.headers.get('Content-Type', '').lower()
             
-            # --- 1. THE TRUTH DETECTOR ---
             if raw_content.startswith(b'%PDF'):
                 logger.info("✅ Raw PDF bytes detected. Bypassing Content-Type header lie.")
                 with open(local_filename, 'wb') as f: 
                     f.write(raw_content)
                 return local_filename
             
-            # --- 2. THE SMART EXTRACTOR ---
             if 'text/html' in content_type or not raw_content.startswith(b'%PDF'):
                 logger.info(f"📄 Detected HTML response. Searching for hidden PDF payloads...")
                 
-                # [NEW] 2A. The Base64 JavaScript Decoder
-                # 'JVBER' is the universal Base64 encoding for '%PDF'
                 b64_match = re.search(r'[\'"](JVBER[A-Za-z0-9+/=]+)[\'"]', response.text)
                 if b64_match:
                     logger.info("🧩 Found Base64 encoded PDF payload inside JavaScript! Decoding...")
@@ -408,7 +566,6 @@ class ArtifactProcessor:
                         f.write(pdf_bytes)
                     return local_filename
 
-                # 2B. Standard HTML embedding
                 soup = BeautifulSoup(raw_content, 'html.parser')
                 pdf_url = None
                 

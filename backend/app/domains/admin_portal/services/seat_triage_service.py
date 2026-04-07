@@ -3,8 +3,12 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, and_, desc, func, distinct, cast, String
 from sqlalchemy.dialects.postgresql import insert
-
 from app.models import SeatPolicyQuarantine, SeatBucketTaxonomy, DiscoveredArtifact
+from app.domains.student_portal.college_filter_tool.services.college_filter_rebuild_dispatcher import (
+    CollegeFilterRebuildMode,
+    CollegeFilterRebuildRequest,
+    college_filter_rebuild_dispatcher,
+)
 
 logger = logging.getLogger("SeatTriageService")
 
@@ -45,12 +49,15 @@ class SeatTriageService:
 
     async def promote_bucket(self, db: AsyncSession, violation_id: uuid.UUID) -> bool:
         # 1. Identify which SLUG we are approving
-        target = await db.execute(select(SeatPolicyQuarantine).where(SeatPolicyQuarantine.id == violation_id))
+        target = await db.execute(
+            select(SeatPolicyQuarantine).where(SeatPolicyQuarantine.id == violation_id)
+        )
         ref = target.scalar_one_or_none()
-        if not ref: raise ValueError("Reference not found")
-            
+        if not ref:
+            raise ValueError("Reference not found")
+
         target_slug = ref.seat_bucket_code
-        attrs = ref.raw_row # These are the pre-saved DNA attributes from Step 1
+        attrs = ref.raw_row  # These are the pre-saved DNA attributes from Step 1
 
         try:
             # 2. Add to Master Taxonomy once
@@ -69,13 +76,19 @@ class SeatTriageService:
             # 3. Resolve ALL violations sharing this slug across ALL colleges
             await db.execute(
                 update(SeatPolicyQuarantine)
-                .where(and_(SeatPolicyQuarantine.seat_bucket_code == target_slug, SeatPolicyQuarantine.status == "OPEN"))
+                .where(
+                    and_(
+                        SeatPolicyQuarantine.seat_bucket_code == target_slug,
+                        SeatPolicyQuarantine.status == "OPEN"
+                    )
+                )
                 .values(status="RESOLVED")
             )
 
             # 4. Trigger Reprocessing for ALL affected artifacts
             files_res = await db.execute(
-                select(distinct(SeatPolicyQuarantine.source_file)).where(SeatPolicyQuarantine.seat_bucket_code == target_slug)
+                select(distinct(SeatPolicyQuarantine.source_file))
+                .where(SeatPolicyQuarantine.seat_bucket_code == target_slug)
             )
             file_ids = [uuid.UUID(row[0]) for row in files_res.all() if row[0]]
 
@@ -87,10 +100,29 @@ class SeatTriageService:
                 )
 
             await db.commit()
-            return True
-        except Exception as e:
+
+        except Exception:
             await db.rollback()
-            raise e
+            raise
+
+        try:
+            college_filter_rebuild_dispatcher.dispatch(
+                CollegeFilterRebuildRequest(
+                    reason="SEAT_TAXONOMY_PROMOTED",
+                    rebuild_mode=CollegeFilterRebuildMode.SERVING_AND_READ_MODEL,
+                    trigger_exam_code=ref.exam_code,
+                    created_by="system:seat_triage",
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Failed to dispatch college-filter rebuild after seat promote "
+                "violation_id=%s exam_code=%s",
+                violation_id,
+                ref.exam_code,
+            )
+
+        return True
 
     async def ignore_bucket(self, db: AsyncSession, violation_id: uuid.UUID):
         target = await db.execute(select(SeatPolicyQuarantine.seat_bucket_code).where(SeatPolicyQuarantine.id == violation_id))

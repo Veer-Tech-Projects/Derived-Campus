@@ -17,6 +17,11 @@ from app.models import (
 )
 from ingestion.media_ingestion.tasks import ingest_college_media_task
 from ingestion.media_ingestion.core.storage_client import MinioStorageClient
+from app.domains.student_portal.college_filter_tool.services.college_filter_rebuild_dispatcher import (
+    CollegeFilterRebuildMode,
+    CollegeFilterRebuildRequest,
+    college_filter_rebuild_dispatcher,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,48 +151,77 @@ class MediaGovernanceService:
             if action not in ("ACCEPT", "REJECT", "DELETE"):
                 raise HTTPException(status_code=400, detail="Invalid action.")
 
-            target_stub = db.query(CollegeMedia).filter(CollegeMedia.id == media_id, CollegeMedia.college_id == college_id).first()
-            if not target_stub: raise HTTPException(status_code=404, detail="Media candidate not found.")
+            target_stub = db.query(CollegeMedia).filter(
+                CollegeMedia.id == media_id,
+                CollegeMedia.college_id == college_id
+            ).first()
+            if not target_stub:
+                raise HTTPException(status_code=404, detail="Media candidate not found.")
 
-            slot_rows = db.query(CollegeMedia).filter(CollegeMedia.college_id == college_id, CollegeMedia.media_type == target_stub.media_type).order_by(CollegeMedia.id).with_for_update(nowait=True).all()
+            slot_rows = db.query(CollegeMedia).filter(
+                CollegeMedia.college_id == college_id,
+                CollegeMedia.media_type == target_stub.media_type
+            ).order_by(CollegeMedia.id).with_for_update(nowait=True).all()
+
             target_media = {row.id: row for row in slot_rows}.get(media_id)
-            if not target_media: raise HTTPException(status_code=404, detail="Media candidate not found.")
+            if not target_media:
+                raise HTTPException(status_code=404, detail="Media candidate not found.")
 
             if action == "ACCEPT":
-                if target_media.status != MediaStatusEnum.PENDING: raise HTTPException(status_code=400, detail="Can only accept PENDING media.")
+                if target_media.status != MediaStatusEnum.PENDING:
+                    raise HTTPException(status_code=400, detail="Can only accept PENDING media.")
                 for row in slot_rows:
                     if row.id != target_media.id and row.status == MediaStatusEnum.ACCEPTED:
                         if row.storage_key and row.storage_key != "DELETED_ORPHAN":
                             s3_keys_to_delete.append(row.storage_key)
                         db.delete(row)
                 target_media.status = MediaStatusEnum.ACCEPTED
-                tracker = db.query(MediaIngestionTracker).filter_by(college_id=college_id, media_type=target_media.media_type.value).first()
+
+                tracker = db.query(MediaIngestionTracker).filter_by(
+                    college_id=college_id,
+                    media_type=target_media.media_type.value
+                ).first()
                 if tracker:
                     tracker.attempt_count = 0
                     tracker.is_exhausted = False
                 else:
-                    db.add(MediaIngestionTracker(college_id=college_id, media_type=target_media.media_type.value, attempt_count=0, is_exhausted=False))
+                    db.add(
+                        MediaIngestionTracker(
+                            college_id=college_id,
+                            media_type=target_media.media_type.value,
+                            attempt_count=0,
+                            is_exhausted=False,
+                        )
+                    )
 
             elif action == "REJECT":
-                if target_media.status != MediaStatusEnum.PENDING: raise HTTPException(status_code=400, detail="Only PENDING media can be rejected.")
+                if target_media.status != MediaStatusEnum.PENDING:
+                    raise HTTPException(status_code=400, detail="Only PENDING media can be rejected.")
                 target_media.status = MediaStatusEnum.REJECTED
-                if target_media.storage_key and target_media.storage_key != "DELETED_ORPHAN": s3_keys_to_delete.append(target_media.storage_key)
-                target_media.storage_key = "DELETED_ORPHAN" 
+                if target_media.storage_key and target_media.storage_key != "DELETED_ORPHAN":
+                    s3_keys_to_delete.append(target_media.storage_key)
+                target_media.storage_key = "DELETED_ORPHAN"
 
             elif action == "DELETE":
-                if target_media.status != MediaStatusEnum.ACCEPTED: raise HTTPException(status_code=400, detail="Only ACCEPTED media can be deleted.")
-                if target_media.storage_key and target_media.storage_key != "DELETED_ORPHAN": s3_keys_to_delete.append(target_media.storage_key)
+                if target_media.status != MediaStatusEnum.ACCEPTED:
+                    raise HTTPException(status_code=400, detail="Only ACCEPTED media can be deleted.")
+                if target_media.storage_key and target_media.storage_key != "DELETED_ORPHAN":
+                    s3_keys_to_delete.append(target_media.storage_key)
                 db.delete(target_media)
 
-            # --- FIX 2: WIPE THE PHANTOM LOCK ---
-            # If an admin manually intervenes, the ingestion cycle is resolved.
-            # We wipe the dispatch lock so it can be re-ingested immediately without waiting 15 mins.
             db.query(MediaDispatchLock).filter(
                 MediaDispatchLock.college_id == college_id,
                 MediaDispatchLock.media_type == target_media.media_type.value
             ).delete()
 
-            db.add(AdminAuditTrail(admin_id=admin_id, action=f"TRIAGE_{action}", target_resource=str(college_id), details={"media_id": str(media_id)}))
+            db.add(
+                AdminAuditTrail(
+                    admin_id=admin_id,
+                    action=f"TRIAGE_{action}",
+                    target_resource=str(college_id),
+                    details={"media_id": str(media_id)},
+                )
+            )
             db.commit()
 
         except OperationalError as e:
@@ -198,13 +232,36 @@ class MediaGovernanceService:
         except HTTPException:
             db.rollback()
             raise
-        except Exception as e:
+        except Exception:
             db.rollback()
             raise HTTPException(status_code=500, detail="Internal server error.")
 
+        try:
+            college_filter_rebuild_dispatcher.dispatch(
+                CollegeFilterRebuildRequest(
+                    reason=f"MEDIA_{action}",
+                    rebuild_mode=CollegeFilterRebuildMode.READ_MODEL_ONLY,
+                    trigger_exam_code=None,
+                    created_by=f"admin:{admin_id}",
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Failed to dispatch college-filter read-model rebuild after media triage "
+                "college_id=%s media_id=%s action=%s",
+                college_id,
+                media_id,
+                action,
+            )
+
         for s3_key in s3_keys_to_delete:
-            try: self.storage_client.s3_client.delete_object(Bucket=self.storage_client.bucket_name, Key=s3_key)
-            except Exception: pass
+            try:
+                self.storage_client.s3_client.delete_object(
+                    Bucket=self.storage_client.bucket_name,
+                    Key=s3_key
+                )
+            except Exception:
+                pass
 
         return {"message": f"Successfully marked as {action}", "media_id": str(media_id)}
 

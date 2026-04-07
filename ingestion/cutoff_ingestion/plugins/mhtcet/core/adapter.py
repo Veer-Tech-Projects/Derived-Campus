@@ -142,7 +142,11 @@ class MHTCETContextAdapter(ContextAdapter):
             }
         }
 
-    def resolve_descriptive_attributes(self, row: Dict[str, Any]) -> Dict[str, str]:
+    def resolve_descriptive_attributes(
+        self,
+        row: Dict[str, Any],
+        college_id: Optional[Any] = None
+    ) -> Dict[str, str]:
         raw_dte = row.get("college_dte_code") or row.get("choice_code", "UNKNOWN")
         dte_code = self._extract_dte_code(raw_dte) or "UNKNOWN"
         

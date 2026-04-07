@@ -44,3 +44,22 @@ MH_KNOWN_CATEGORIES = [
 
 P_SQUISHED_CAT_SPLITTER = re.compile(rf'^({"|".join(MH_KNOWN_CATEGORIES)})\s*(.*)$', re.IGNORECASE)
 P_SQUISHED_ANCHOR = re.compile(rf'.*([MF])\s*((?:{"|".join(MH_KNOWN_CATEGORIES)}).*)', re.IGNORECASE)
+
+
+MH_INSTITUTE_PREFIX_TO_COURSE_TYPE = {
+    "1": "MBBS",
+    "2": "BDS",
+    "3": "BAMS",
+    "4": "BHMS",
+    "5": "BUMS",
+    "6": "BPTH",
+    "7": "BOTH",
+    "8": "BASLP",
+    "9": "BP&O",
+}
+
+MH_DOC_GROUP_ALLOWED_COURSE_TYPES = {
+    "MBBS_BDS": {"MBBS", "BDS"},
+    "AYUSH": {"BAMS", "BHMS", "BUMS"},
+    "ALLIED": {"BPTH", "BOTH", "BASLP", "BP&O", "BNYS"},
+}

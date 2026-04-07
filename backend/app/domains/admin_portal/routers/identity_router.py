@@ -19,6 +19,38 @@ def get_sync_db():
     finally:
         db.close()
 
+def _get_candidate_origin_source_type(db: Session, candidate: CollegeCandidate) -> str:
+    artifact = db.execute(
+        select(DiscoveredArtifact).where(
+            DiscoveredArtifact.id == uuid.UUID(candidate.source_document)
+        )
+    ).scalar_one_or_none()
+
+    if not artifact:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing originating artifact for candidate {candidate.candidate_id}"
+        )
+
+    # Enterprise-safe semantic source resolution:
+    # prefer exam family / exam slug over transport-layer detected_source.
+    if getattr(artifact, "exam_code", None):
+        return str(artifact.exam_code).strip().lower()
+
+    raw_metadata = getattr(artifact, "raw_metadata", None) or {}
+    exam_slug = raw_metadata.get("exam_slug")
+    if exam_slug:
+        return str(exam_slug).strip().lower()
+
+    detected_source = getattr(artifact, "detected_source", None)
+    if detected_source:
+        return str(detected_source).strip().lower()
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Missing semantic origin source for candidate {candidate.candidate_id}"
+    )
+
 class LinkRequest(BaseModel):
     candidate_ids: List[int]
     target_registry_uuid: uuid.UUID
@@ -41,7 +73,14 @@ def link_candidate(
     if not candidates: raise HTTPException(404, "No candidates found")
 
     for cand in candidates:
-        service.link_alias(db, req.target_registry_uuid, service.normalize_name(cand.raw_name), "manual_triage")
+        cand_origin_source = _get_candidate_origin_source_type(db, cand)
+        service.link_alias(
+            db,
+            req.target_registry_uuid,
+            cand.raw_name,
+            "manual_triage",
+            origin_source_type=cand_origin_source,
+        )
         
         # [FIX] Use actual admin email
         db.add(RegistryAuditLog(
@@ -71,13 +110,24 @@ def promote_new_college(
     candidates = db.query(CollegeCandidate).filter(CollegeCandidate.candidate_id.in_(req.candidate_ids)).all()
     if not candidates: raise HTTPException(404, "No candidates found")
 
-    normalized = service.normalize_name(req.official_name)
-    
+        # Use the originating candidate source for identity normalization.
+    # If multiple candidates are selected, they must share the same source family.
+    candidate_source_types = {_get_candidate_origin_source_type(db, c) for c in candidates}
+    if len(candidate_source_types) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Selected candidates span multiple source types: {sorted(candidate_source_types)}"
+        )
+
+    origin_source_type = next(iter(candidate_source_types))
+    normalized = service.normalize_name(req.official_name, source_type=origin_source_type)
+
     new_id = service.promote_candidate(
-        db, 
-        req.official_name, 
-        normalized, 
-        "manual_promotion"
+        db,
+        req.official_name,
+        normalized,
+        "manual_promotion",
+        origin_source_type=origin_source_type,
     )
     
     # [FIX] Use actual admin email
@@ -88,9 +138,16 @@ def promote_new_college(
     ))
 
     for cand in candidates:
-        norm_cand = service.normalize_name(cand.raw_name)
+        cand_origin_source = _get_candidate_origin_source_type(db, cand)
+        norm_cand = service.normalize_name(cand.raw_name, source_type=cand_origin_source)
         if norm_cand != normalized:
-            service.link_alias(db, new_id, norm_cand, "manual_triage")
+            service.link_alias(
+                db,
+                new_id,
+                cand.raw_name,
+                "manual_triage",
+                origin_source_type=cand_origin_source,
+            )
             
         db.execute(
             update(DiscoveredArtifact)

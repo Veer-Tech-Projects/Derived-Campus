@@ -41,7 +41,11 @@ class KarnatakaNEETContextAdapter(ContextAdapter):
             }
         }
 
-    def resolve_descriptive_attributes(self, row: Dict[str, Any]) -> Dict[str, str]:
+    def resolve_descriptive_attributes(
+        self,
+        row: Dict[str, Any],
+        college_id: Optional[Any] = None
+    ) -> Dict[str, str]:
         return {
             "institute_code": row.get('kea_code') or 'UNKNOWN',
             "institute_name": row.get('college_name_raw') or 'UNKNOWN',
@@ -58,7 +62,7 @@ class KarnatakaNEETContextAdapter(ContextAdapter):
             year=row['year'],
             source_artifact_id=row['source_artifact_id']
         ).on_conflict_do_update(
-            constraint='uq_neet_metadata_code_year',
+            constraint='uq_neet_metadata_identity',
             set_={"kea_college_name_raw": row['college_name_raw']}
         )
         db.execute(stmt)

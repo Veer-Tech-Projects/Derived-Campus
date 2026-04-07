@@ -64,7 +64,10 @@ class ContextManager:
         adapter.upsert_exam_metadata(db, identity_result.college_id, row_data)
 
         # 5. Descriptive
-        desc = adapter.resolve_descriptive_attributes(row_data)
+        desc = adapter.resolve_descriptive_attributes(
+            row_data,
+            college_id=identity_result.college_id
+        )
 
         return ResolvedContext(
             college_id=identity_result.college_id,

@@ -6,6 +6,7 @@ from ingestion.cutoff_ingestion.plugins.kcet.round_normalizer import RoundNormal
 from ingestion.cutoff_ingestion.plugins.kcet.adapter import KCETContextAdapter
 from ingestion.cutoff_ingestion.plugins.kcet.table_parser import KCETTableParser
 from ingestion.cutoff_ingestion.plugins.kcet.scanner import KCETScanner 
+from ingestion.cutoff_ingestion.plugins.kcet.row_standardizer import KCETRowStandardizer
 
 class KCETPlugin(BaseCutoffPlugin):
 
@@ -207,8 +208,9 @@ class KCETPlugin(BaseCutoffPlugin):
         return name.strip("_")
 
     def transform_row_to_context(self, row: Dict[str, Any], artifact: Any, sanitized_stream: str) -> Dict[str, Any]:
-        loc_norm = "GEN" if row['seat_type'] == "GENERAL" else "HK"
-        if row['seat_type'] == "PRIVATE": loc_norm = "PVT"
+        loc_norm = KCETRowStandardizer.resolve_location_type(row["category_raw"])
+        if loc_norm == "UNKNOWN":
+            raise ValueError(f"Unrecognized KCET category token: {row['category_raw']}")
         return {
             "college_name_raw": row['college_name_raw'],
             "source_type": "kcet_pdf",

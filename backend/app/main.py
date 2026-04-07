@@ -12,10 +12,13 @@ from app.domains.admin_portal.routers import (
     config_router, 
     seat_triage_router,
     audit_router,
-    media_governance_router
+    media_governance_router,
+    course_triage_router,
+    location_governance_router
 )
 # [UPDATE] Add admin_management_router
 from app.domains.admin_auth.routers import auth_router, admin_management_router 
+from app.domains.student_portal.college_filter_tool.routers import college_filter_router
 
 app = FastAPI(title=settings.PROJECT_NAME)
 
@@ -41,10 +44,11 @@ app.include_router(config_router.router)
 app.include_router(seat_triage_router.router)
 app.include_router(auth_router.router)
 app.include_router(media_governance_router.router)
-
-# [NEW ROUTERS]
+app.include_router(course_triage_router.router)
+app.include_router(location_governance_router.router)
 app.include_router(admin_management_router.router)
 app.include_router(audit_router.router)
+app.include_router(college_filter_router.router)
 
 @app.get("/")
 async def root():

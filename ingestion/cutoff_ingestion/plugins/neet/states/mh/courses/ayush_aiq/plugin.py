@@ -30,7 +30,6 @@ class MHNeetAyushAiqPlugin(BaseMHNeetPlugin):
         row = super().transform_row_to_context(row, artifact, sanitized_stream)
         
         # Override to ensure dimensional perfection for AIQ
-        row['program_code'] = "AYUSH"
         row['quota_normalized'] = "AIQ" # Forces the standardizer to recognize this as an All India seat
         
         return row

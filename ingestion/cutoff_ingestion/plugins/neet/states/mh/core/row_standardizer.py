@@ -124,3 +124,36 @@ class MHNeetRowStandardizer:
     def is_reserved(cls, category: str) -> bool:
         clean_cat = re.sub(r'[^A-Z0-9]', '', category.upper())
         return clean_cat not in ["OPEN", "GENERAL", "UR", ""]
+
+    
+    @classmethod
+    def derive_course_type_from_institute_code(cls, institute_code: str) -> str:
+        code = str(institute_code or "").strip()
+        if not code:
+            raise ValueError("Missing institute_code for MH medical course-type derivation.")
+
+        # Preserve leading zero and allow 4-6 digit codes
+        if not code.isdigit():
+            raise ValueError(f"Non-numeric institute_code for MH medical: {institute_code}")
+
+        # BNYS must be checked before generic 9-prefix handling.
+        if code.startswith("98"):
+            return "BNYS"
+
+        prefix = code[0]
+        course_type = M.MH_INSTITUTE_PREFIX_TO_COURSE_TYPE.get(prefix)
+        if not course_type:
+            raise ValueError(f"Unsupported institute_code prefix for MH medical: {institute_code}")
+
+        return course_type
+
+    @classmethod
+    def validate_course_type_against_document_group(cls, course_type: str, document_group: str) -> None:
+        allowed = M.MH_DOC_GROUP_ALLOWED_COURSE_TYPES.get(str(document_group or "").upper())
+        if not allowed:
+            raise ValueError(f"Unknown MH document group: {document_group}")
+
+        if course_type not in allowed:
+            raise ValueError(
+                f"Derived course_type '{course_type}' is incompatible with document_group '{document_group}'"
+            )

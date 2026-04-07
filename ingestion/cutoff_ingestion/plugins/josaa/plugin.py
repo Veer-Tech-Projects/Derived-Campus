@@ -47,6 +47,7 @@ class JosaaPlugin(BaseCutoffPlugin):
             
         context['institute_type'] = inst_type
         context['exam_code'] = exam_code
+        context['source_type'] = "josaa"
 
         # --- 2. Program Amputation & Deterministic Slugging ---
         raw_program = row.get("Academic Program Name", "")

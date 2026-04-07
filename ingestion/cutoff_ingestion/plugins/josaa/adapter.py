@@ -36,9 +36,16 @@ class JosaaAdapter(ContextAdapter):
             }
         }
 
-    def resolve_descriptive_attributes(self, row: Dict[str, Any]) -> Dict[str, str]:
+    def resolve_descriptive_attributes(
+        self,
+        row: Dict[str, Any],
+        college_id: Optional[UUID] = None
+    ) -> Dict[str, str]:
+        if not college_id:
+            raise ValueError("JoSAA descriptive resolution requires resolved college_id.")
+
         return {
-            "institute_code": str(row.get('institute_type', 'GFTI')), 
+            "institute_code": str(college_id),
             "institute_name": row.get('college_name_raw', 'UNKNOWN'),
             "program_code": row.get('program_code', 'UNKNOWN'),
             "program_name": row.get('program_name', 'UNKNOWN')
