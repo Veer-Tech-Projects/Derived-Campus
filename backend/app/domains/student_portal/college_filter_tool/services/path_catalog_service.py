@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ExamPathCatalog
 from app.domains.student_portal.college_filter_tool.schemas.runtime_search_schemas import (
@@ -25,20 +26,21 @@ class CollegeFilterPathCatalogService:
     - do not infer or invent children; use parent_path_id as stored
     """
 
-    def build_path_catalog_response(
+    async def build_path_catalog_response(
         self,
-        db: Session,
+        db: AsyncSession,
     ) -> CollegeFilterPathCatalogResponse:
-        rows: List[ExamPathCatalog] = (
-            db.query(ExamPathCatalog)
-            .filter(ExamPathCatalog.active.is_(True))
+        stmt = (
+            select(ExamPathCatalog)
+            .where(ExamPathCatalog.active.is_(True))
             .order_by(
                 ExamPathCatalog.display_order.asc(),
                 ExamPathCatalog.visible_label.asc(),
                 ExamPathCatalog.path_key.asc(),
             )
-            .all()
         )
+        result = await db.execute(stmt)
+        rows: List[ExamPathCatalog] = result.scalars().all()
 
         items = [
             PathCatalogItemDTO(

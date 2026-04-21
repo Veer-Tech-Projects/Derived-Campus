@@ -39,3 +39,9 @@ lxml==5.1.0
 # --- S3 & Binary IO ---
 boto3>=1.34.0
 python-magic>=0.4.27
+
+# --- STUDENT AUTH (PHASE 1) ---
+Authlib==1.3.0
+phonenumbers==8.13.40
+
+Pillow==10.4.0

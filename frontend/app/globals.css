@@ -245,6 +245,84 @@
   }
 }
 
+@layer utilities {
+  .onb-shell-bg {
+    background:
+      radial-gradient(circle at top left, color-mix(in oklab, var(--primary) 14%, transparent) 0%, transparent 32%),
+      radial-gradient(circle at top right, color-mix(in oklab, var(--accent) 16%, transparent) 0%, transparent 28%),
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--background) 92%, var(--secondary) 8%) 0%,
+        var(--background) 100%
+      );
+  }
+
+  .onb-shell-overlay {
+    min-height: 100vh;
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--background) 88%, transparent) 0%,
+        color-mix(in oklab, var(--background) 97%, transparent) 100%
+      );
+  }
+
+  .onb-mobile-safe {
+    padding-top: max(1.25rem, env(safe-area-inset-top));
+    padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
+  }
+
+  .onb-stage-surface {
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--card) 85%, var(--secondary) 15%) 0%,
+        color-mix(in oklab, var(--card) 94%, var(--background) 6%) 100%
+      );
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.08);
+  }
+
+  .onb-stage-glow {
+    background: color-mix(in oklab, var(--primary) 24%, transparent);
+    opacity: 0.55;
+  }
+
+  .onb-hero-wrap {
+    min-height: 220px;
+  }
+
+  .onb-panel {
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--card) 96%, white 4%) 0%,
+        color-mix(in oklab, var(--card) 100%, transparent) 100%
+      );
+  }
+
+  .onb-panel-muted {
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--secondary) 58%, var(--card) 42%) 0%,
+        color-mix(in oklab, var(--background) 84%, var(--secondary) 16%) 100%
+      );
+  }
+
+  .onb-progress-track {
+    background: color-mix(in oklab, var(--muted) 82%, var(--border) 18%);
+  }
+
+  .onb-progress-fill {
+    background:
+      linear-gradient(
+        90deg,
+        color-mix(in oklab, var(--primary) 94%, white 6%) 0%,
+        color-mix(in oklab, var(--accent) 38%, var(--primary) 62%) 100%
+      );
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

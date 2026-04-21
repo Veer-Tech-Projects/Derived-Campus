@@ -19,12 +19,14 @@ const nextConfig: NextConfig = {
         port,
         pathname: "/**",
       },
+      {
+        protocol: "https",
+        hostname: "lh3.googleusercontent.com",
+        pathname: "/**",
+      },
     ],
 
-    // Required for local MinIO / local-network image optimization in dev
     dangerouslyAllowLocalIP: true,
-
-    // Explicit and production-safe in Next 16
     qualities: [75],
   },
 };

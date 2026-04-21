@@ -6,7 +6,8 @@ from typing import Dict, Iterable, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ProbabilityPolicyConfig
 from app.domains.student_portal.college_filter_tool.repositories.search_repository import (
@@ -66,17 +67,17 @@ class PolicyResolutionService:
     No invented constants are allowed when the DB already provides policy parameters.
     """
 
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
         self._default_policy_cache: ResolvedProbabilityPolicy | None = None
 
-    def resolve_for_row(self, row: SearchRepositoryRow) -> ResolvedProbabilityPolicy:
+    async def resolve_for_row(self, row: SearchRepositoryRow) -> ResolvedProbabilityPolicy:
         if row.active_policy_id:
-            policy = self._load_active_policy_by_id(row.active_policy_id)
+            policy = await self._load_active_policy_by_id(row.active_policy_id)
             if policy:
                 return policy
 
-        default_policy = self._load_default_active_policy()
+        default_policy = await self._load_default_active_policy()
         if default_policy:
             return default_policy
 
@@ -85,7 +86,7 @@ class PolicyResolutionService:
             detail="No active probability policy could be resolved for runtime scoring.",
         )
 
-    def resolve_map_for_rows(
+    async def resolve_map_for_rows(
         self,
         rows: Iterable[SearchRepositoryRow],
     ) -> Dict[UUID, ResolvedProbabilityPolicy]:
@@ -104,20 +105,21 @@ class PolicyResolutionService:
 
         policies_by_id: Dict[UUID, ResolvedProbabilityPolicy] = {}
         if requested_policy_ids:
-            db_rows = (
-                self.db.query(ProbabilityPolicyConfig)
-                .filter(
+            stmt = (
+                select(ProbabilityPolicyConfig)
+                .where(
                     ProbabilityPolicyConfig.policy_id.in_(list(requested_policy_ids)),
                     ProbabilityPolicyConfig.is_active.is_(True),
                 )
-                .all()
             )
+            result = await self.db.execute(stmt)
+            db_rows = result.scalars().all()
             policies_by_id = {
                 policy.policy_id: self._map_policy(policy)
                 for policy in db_rows
             }
 
-        default_policy = self._load_default_active_policy()
+        default_policy = await self._load_default_active_policy()
 
         resolved: Dict[UUID, ResolvedProbabilityPolicy] = {}
         for row in rows:
@@ -133,27 +135,28 @@ class PolicyResolutionService:
 
         return resolved
 
-    def _load_active_policy_by_id(
+    async def _load_active_policy_by_id(
         self,
         policy_id: UUID,
     ) -> Optional[ResolvedProbabilityPolicy]:
-        db_row = (
-            self.db.query(ProbabilityPolicyConfig)
-            .filter(
+        stmt = (
+            select(ProbabilityPolicyConfig)
+            .where(
                 ProbabilityPolicyConfig.policy_id == policy_id,
                 ProbabilityPolicyConfig.is_active.is_(True),
             )
-            .one_or_none()
         )
+        result = await self.db.execute(stmt)
+        db_row = result.scalar_one_or_none()
         return self._map_policy(db_row) if db_row else None
 
-    def _load_default_active_policy(self) -> Optional[ResolvedProbabilityPolicy]:
+    async def _load_default_active_policy(self) -> Optional[ResolvedProbabilityPolicy]:
         if self._default_policy_cache is not None:
             return self._default_policy_cache
 
-        db_row = (
-            self.db.query(ProbabilityPolicyConfig)
-            .filter(
+        stmt = (
+            select(ProbabilityPolicyConfig)
+            .where(
                 ProbabilityPolicyConfig.is_active.is_(True),
                 ProbabilityPolicyConfig.path_id.is_(None),
             )
@@ -161,8 +164,11 @@ class PolicyResolutionService:
                 ProbabilityPolicyConfig.version_no.desc(),
                 ProbabilityPolicyConfig.created_at.desc(),
             )
-            .first()
+            .limit(1)
         )
+
+        result = await self.db.execute(stmt)
+        db_row = result.scalar_one_or_none()
 
         if db_row is None:
             return None

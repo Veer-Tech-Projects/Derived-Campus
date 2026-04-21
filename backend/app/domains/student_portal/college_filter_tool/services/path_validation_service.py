@@ -6,7 +6,8 @@ from typing import Any, Dict, List, Set
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ExamPathCatalog, ExamPathFilterSchema
 from app.domains.student_portal.college_filter_tool.schemas.runtime_search_schemas import (
@@ -60,27 +61,33 @@ class PathValidationService:
     """
 
     @staticmethod
-    def resolve_and_validate(
-        db: Session,
+    async def resolve_and_validate(
+        db: AsyncSession,
         request: CollegeFilterSearchRequest,
     ) -> ResolvedPathContext:
-        path = (
-            db.query(ExamPathCatalog)
-            .filter(
+        path_stmt = (
+            select(ExamPathCatalog)
+            .where(
                 ExamPathCatalog.path_id == request.path_id,
                 ExamPathCatalog.active == True,  # noqa: E712
             )
-            .first()
         )
+        path_result = await db.execute(path_stmt)
+        path = path_result.scalar_one_or_none()
+
         if not path:
             raise HTTPException(status_code=404, detail="Active exam path not found")
 
-        filter_rows = (
-            db.query(ExamPathFilterSchema)
-            .filter(ExamPathFilterSchema.path_id == request.path_id)
-            .order_by(ExamPathFilterSchema.sort_order.asc(), ExamPathFilterSchema.filter_key.asc())
-            .all()
+        filter_stmt = (
+            select(ExamPathFilterSchema)
+            .where(ExamPathFilterSchema.path_id == request.path_id)
+            .order_by(
+                ExamPathFilterSchema.sort_order.asc(),
+                ExamPathFilterSchema.filter_key.asc(),
+            )
         )
+        filter_result = await db.execute(filter_stmt)
+        filter_rows = filter_result.scalars().all()
 
         if not filter_rows:
             raise HTTPException(
@@ -105,8 +112,12 @@ class PathValidationService:
             ResolvedFilterSchema(
                 filter_key=row.filter_key,
                 filter_label=row.filter_label,
-                control_type=str(row.control_type.value if hasattr(row.control_type, "value") else row.control_type),
-                option_source=str(row.option_source.value if hasattr(row.option_source, "value") else row.option_source),
+                control_type=str(
+                    row.control_type.value if hasattr(row.control_type, "value") else row.control_type
+                ),
+                option_source=str(
+                    row.option_source.value if hasattr(row.option_source, "value") else row.option_source
+                ),
                 is_required=bool(row.is_required),
                 is_visible=bool(row.is_visible),
                 is_auto_fillable=bool(row.is_auto_fillable),
@@ -136,7 +147,7 @@ class PathValidationService:
         )
 
     @staticmethod
-    def get_path_only(db: Session, path_id: UUID) -> ResolvedPathContext:
+    async def get_path_only(db: AsyncSession, path_id: UUID) -> ResolvedPathContext:
         """
         Metadata-only variant used by GET /metadata/{path_id}.
         No runtime request body required.
@@ -146,23 +157,31 @@ class PathValidationService:
             score=Decimal("1"),
             filters={},
         )
-        path = (
-            db.query(ExamPathCatalog)
-            .filter(
+
+        path_stmt = (
+            select(ExamPathCatalog)
+            .where(
                 ExamPathCatalog.path_id == path_id,
                 ExamPathCatalog.active == True,  # noqa: E712
             )
-            .first()
         )
+        path_result = await db.execute(path_stmt)
+        path = path_result.scalar_one_or_none()
+
         if not path:
             raise HTTPException(status_code=404, detail="Active exam path not found")
 
-        filter_rows = (
-            db.query(ExamPathFilterSchema)
-            .filter(ExamPathFilterSchema.path_id == path_id)
-            .order_by(ExamPathFilterSchema.sort_order.asc(), ExamPathFilterSchema.filter_key.asc())
-            .all()
+        filter_stmt = (
+            select(ExamPathFilterSchema)
+            .where(ExamPathFilterSchema.path_id == path_id)
+            .order_by(
+                ExamPathFilterSchema.sort_order.asc(),
+                ExamPathFilterSchema.filter_key.asc(),
+            )
         )
+        filter_result = await db.execute(filter_stmt)
+        filter_rows = filter_result.scalars().all()
+
         if not filter_rows:
             raise HTTPException(
                 status_code=500,
@@ -174,8 +193,12 @@ class PathValidationService:
             ResolvedFilterSchema(
                 filter_key=row.filter_key,
                 filter_label=row.filter_label,
-                control_type=str(row.control_type.value if hasattr(row.control_type, "value") else row.control_type),
-                option_source=str(row.option_source.value if hasattr(row.option_source, "value") else row.option_source),
+                control_type=str(
+                    row.control_type.value if hasattr(row.control_type, "value") else row.control_type
+                ),
+                option_source=str(
+                    row.option_source.value if hasattr(row.option_source, "value") else row.option_source
+                ),
                 is_required=bool(row.is_required),
                 is_visible=bool(row.is_visible),
                 is_auto_fillable=bool(row.is_auto_fillable),

@@ -1415,3 +1415,288 @@ class SearchReadModel(Base):
             "college_id"
         ),
     )
+
+# --- STUDENT AUTH ENUMS ---
+
+class StudentAccountStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    SUSPENDED = "SUSPENDED"
+    DISABLED = "DISABLED"
+
+
+class StudentOnboardingStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
+
+
+class StudentAuthProvider(str, enum.Enum):
+    GOOGLE = "GOOGLE"
+    APPLE = "APPLE"
+    FACEBOOK = "FACEBOOK"
+    X = "X"
+
+
+class StudentSessionStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    REVOKED = "REVOKED"
+    EXPIRED = "EXPIRED"
+
+
+# --- STUDENT USER MODEL ---
+class StudentUser(Base):
+    __tablename__ = "student_users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    # Platform-owned profile (authoritative after onboarding)
+    first_name = Column(String(100), nullable=True)
+    last_name = Column(String(100), nullable=True)
+    display_name = Column(String(200), nullable=True)
+
+    # Platform-owned avatar SOT (separate from provider avatar metadata)
+    profile_image_storage_key = Column(String(512), nullable=True)
+
+    profile_image_version = Column(
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    )
+
+    # India-only v1 phone capture (mandatory later at onboarding, unverified)
+    phone_number_e164 = Column(String(20), nullable=True, index=True)
+    phone_country_code = Column(String(2), nullable=False, server_default=text("'IN'"))
+    phone_is_verified = Column(Boolean, nullable=False, server_default=text("false"))
+
+    # Lifecycle / auth state
+    account_status = Column(
+        SqEnum(StudentAccountStatus, name="student_account_status_enum"),
+        nullable=False,
+        server_default=text("'ACTIVE'")
+    )
+    onboarding_status = Column(
+        SqEnum(StudentOnboardingStatus, name="student_onboarding_status_enum"),
+        nullable=False,
+        server_default=text("'PENDING'")
+    )
+
+    # Refresh-safe onboarding recovery
+    onboarding_last_completed_step = Column(Integer, nullable=True)
+
+    # Security / activity
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Audit timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    external_identities = relationship(
+        "StudentExternalIdentity",
+        back_populates="student_user",
+        cascade="all, delete-orphan",
+    )
+    exam_preferences = relationship(
+        "StudentExamPreference",
+        back_populates="student_user",
+        cascade="all, delete-orphan",
+    )
+    auth_sessions = relationship(
+        "StudentAuthSession",
+        back_populates="student_user",
+        cascade="all, delete-orphan",
+    )
+    auth_audit_logs = relationship(
+        "StudentAuthAuditLog",
+        back_populates="student_user",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("idx_student_user_account_status", "account_status"),
+        Index("idx_student_user_onboarding_status", "onboarding_status"),
+        Index("idx_student_user_created_at", "created_at"),
+    )
+
+
+# --- STUDENT EXTERNAL IDENTITY MODEL ---
+class StudentExternalIdentity(Base):
+    __tablename__ = "student_external_identities"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    student_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("student_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    provider = Column(
+        SqEnum(StudentAuthProvider, name="student_auth_provider_enum"),
+        nullable=False,
+    )
+    provider_user_id = Column(String(255), nullable=False)
+
+    # Optional provider metadata only; never platform SOT
+    provider_email = Column(String(255), nullable=True)
+    provider_email_verified = Column(Boolean, nullable=True)
+    provider_avatar_url = Column(Text, nullable=True)
+
+    raw_claims = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    student_user = relationship("StudentUser", back_populates="external_identities")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "provider_user_id",
+            name="uq_student_external_identity_provider_user",
+        ),
+        Index("idx_student_external_identity_student_user", "student_user_id"),
+        Index("idx_student_external_identity_provider", "provider"),
+    )
+
+
+# --- STUDENT EXAM PREFERENCE CATALOG MODEL ---
+class StudentExamPreferenceCatalog(Base):
+    __tablename__ = "student_exam_preference_catalog"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    exam_key = Column(String(64), nullable=False)
+    visible_label = Column(String(128), nullable=False)
+
+    description = Column(Text, nullable=True)
+    active = Column(Boolean, nullable=False, server_default=text("true"))
+    display_order = Column(Integer, nullable=False, server_default=text("0"))
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    preferences = relationship(
+        "StudentExamPreference",
+        back_populates="exam_catalog_item",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("exam_key", name="uq_student_exam_preference_catalog_key"),
+        Index("idx_student_exam_preference_catalog_active_order", "active", "display_order"),
+    )
+
+
+# --- STUDENT EXAM PREFERENCE MODEL ---
+class StudentExamPreference(Base):
+    __tablename__ = "student_exam_preferences"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    student_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("student_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    exam_preference_catalog_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("student_exam_preference_catalog.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    student_user = relationship("StudentUser", back_populates="exam_preferences")
+    exam_catalog_item = relationship("StudentExamPreferenceCatalog", back_populates="preferences")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "student_user_id",
+            "exam_preference_catalog_id",
+            name="uq_student_exam_preference_user_catalog_item",
+        ),
+        Index("idx_student_exam_preference_catalog_id", "exam_preference_catalog_id"),
+    )
+
+
+# --- STUDENT AUTH SESSION MODEL ---
+class StudentAuthSession(Base):
+    __tablename__ = "student_auth_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    student_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("student_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    refresh_token_fingerprint = Column(String(128), nullable=False)
+    status = Column(
+        SqEnum(StudentSessionStatus, name="student_session_status_enum"),
+        nullable=False,
+        server_default=text("'ACTIVE'")
+    )
+
+    issued_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    last_seen_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(512), nullable=True)
+
+    student_user = relationship("StudentUser", back_populates="auth_sessions")
+
+    __table_args__ = (
+        Index("idx_student_auth_session_student_user", "student_user_id"),
+        Index("idx_student_auth_session_status", "status"),
+        Index("idx_student_auth_session_expires_at", "expires_at"),
+    )
+
+
+# --- STUDENT AUTH AUDIT LOG MODEL ---
+class StudentAuthAuditLog(Base):
+    __tablename__ = "student_auth_audit_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    student_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("student_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    provider = Column(
+        SqEnum(StudentAuthProvider, name="student_auth_provider_enum"),
+        nullable=True,
+    )
+
+    event_type = Column(String(64), nullable=False, index=True)
+    status = Column(String(32), nullable=False, index=True)
+    details = Column(JSONB, nullable=False, default=dict)
+
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(512), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+    student_user = relationship("StudentUser", back_populates="auth_audit_logs")
+
+    __table_args__ = (
+        Index("idx_student_auth_audit_user_created", "student_user_id", "created_at"),
+        Index("idx_student_auth_audit_provider_created", "provider", "created_at"),
+    )

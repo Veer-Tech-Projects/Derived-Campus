@@ -1,7 +1,7 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 
 // Environment-aware Base URL
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL;
 
 let accessToken: string | null = null;
 
@@ -106,8 +106,10 @@ apiClient.interceptors.response.use(
       processQueue(refreshError, null);
       setAccessToken(null);
       // Optional: Force redirect if not on login page
-      if (typeof window !== "undefined" && !window.location.pathname.includes("/login")) {
-         window.location.href = "/admin/login";
+      if (typeof window !== "undefined" && window.location.pathname.startsWith("/admin")) {
+        if (window.location.pathname !== "/admin/login") {
+          window.location.href = "/admin/login";
+        }
       }
       return Promise.reject(refreshError);
     } finally {

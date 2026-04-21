@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from typing import Dict, List
 from uuid import UUID
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     ExamPathOptionMap,
@@ -38,16 +39,16 @@ class CollegeFilterMetadataService:
     - STATIC       -> no dynamic options emitted here
     """
 
-    def build_metadata_response(
+    async def build_metadata_response(
         self,
-        db: Session,
+        db: AsyncSession,
         path_id: UUID,
     ) -> CollegeFilterMetadataResponse:
-        ctx = PathValidationService.get_path_only(db=db, path_id=path_id)
+        ctx = await PathValidationService.get_path_only(db=db, path_id=path_id)
 
         filters = []
         for filter_schema in ctx.active_filters:
-            options = self._resolve_options_for_filter(
+            options = await self._resolve_options_for_filter(
                 db=db,
                 path_context=ctx,
                 filter_schema=filter_schema,
@@ -90,9 +91,9 @@ class CollegeFilterMetadataService:
             generated_at=datetime.now(timezone.utc),
         )
 
-    def _resolve_options_for_filter(
+    async def _resolve_options_for_filter(
         self,
-        db: Session,
+        db: AsyncSession,
         path_context: ResolvedPathContext,
         filter_schema: ResolvedFilterSchema,
     ) -> List[FilterOptionDTO]:
@@ -100,10 +101,10 @@ class CollegeFilterMetadataService:
         filter_key = filter_schema.filter_key
 
         if option_source == "PATH_OPTION":
-            return self._load_path_option_values(db=db, path_id=path_context.path_id)
+            return await self._load_path_option_values(db=db, path_id=path_context.path_id)
 
         if option_source == "SERVING_MAP":
-            return self._load_serving_map_values(
+            return await self._load_serving_map_values(
                 db=db,
                 path_id=path_context.path_id,
                 filter_key=filter_key,
@@ -111,24 +112,24 @@ class CollegeFilterMetadataService:
 
         if option_source == "BRANCH":
             if filter_key == "branch":
-                return self._load_branch_discipline_values(
+                return await self._load_branch_discipline_values(
                     db=db,
                     path_id=path_context.path_id,
                 )
 
             if filter_key == "variant":
-                return self._load_branch_specialization_values(
+                return await self._load_branch_specialization_values(
                     db=db,
                     path_id=path_context.path_id,
                 )
 
-            return self._load_branch_values_legacy(
+            return await self._load_branch_values_legacy(
                 db=db,
                 path_id=path_context.path_id,
             )
 
         if option_source == "LOCATION":
-            return self._load_location_placeholder_values(
+            return await self._load_location_placeholder_values(
                 db=db,
                 path_id=path_context.path_id,
                 filter_key=filter_key,
@@ -139,14 +140,14 @@ class CollegeFilterMetadataService:
 
         return []
 
-    def _load_path_option_values(
+    async def _load_path_option_values(
         self,
-        db: Session,
+        db: AsyncSession,
         path_id: UUID,
     ) -> List[FilterOptionDTO]:
-        rows = (
-            db.query(ExamPathOptionMap)
-            .filter(
+        stmt = (
+            select(ExamPathOptionMap)
+            .where(
                 ExamPathOptionMap.path_id == path_id,
                 ExamPathOptionMap.active == True,  # noqa: E712
             )
@@ -155,8 +156,9 @@ class CollegeFilterMetadataService:
                 ExamPathOptionMap.course_type_value.asc(),
                 ExamPathOptionMap.exam_code.asc(),
             )
-            .all()
         )
+        result = await db.execute(stmt)
+        rows = result.scalars().all()
 
         seen = set()
         options: List[FilterOptionDTO] = []
@@ -185,15 +187,15 @@ class CollegeFilterMetadataService:
 
         return options
 
-    def _load_serving_map_values(
+    async def _load_serving_map_values(
         self,
-        db: Session,
+        db: AsyncSession,
         path_id: UUID,
         filter_key: str,
     ) -> List[FilterOptionDTO]:
-        rows = (
-            db.query(ExamSeatFilterServingMap)
-            .filter(
+        stmt = (
+            select(ExamSeatFilterServingMap)
+            .where(
                 ExamSeatFilterServingMap.path_id == path_id,
                 ExamSeatFilterServingMap.filter_key == filter_key,
                 ExamSeatFilterServingMap.active == True,  # noqa: E712
@@ -202,8 +204,9 @@ class CollegeFilterMetadataService:
                 ExamSeatFilterServingMap.option_label.asc(),
                 ExamSeatFilterServingMap.option_key.asc(),
             )
-            .all()
         )
+        result = await db.execute(stmt)
+        rows = result.scalars().all()
 
         seen = set()
         options: List[FilterOptionDTO] = []
@@ -237,21 +240,22 @@ class CollegeFilterMetadataService:
 
         return options
 
-    def _load_branch_discipline_values(
+    async def _load_branch_discipline_values(
         self,
-        db: Session,
+        db: AsyncSession,
         path_id: UUID,
     ) -> List[FilterOptionDTO]:
-        rows = (
-            db.query(ExamProgramServingMap)
-            .filter(ExamProgramServingMap.path_id == path_id)
+        stmt = (
+            select(ExamProgramServingMap)
+            .where(ExamProgramServingMap.path_id == path_id)
             .order_by(
                 ExamProgramServingMap.branch_discipline_label.asc(),
                 ExamProgramServingMap.branch_discipline_key.asc(),
                 ExamProgramServingMap.program_code.asc(),
             )
-            .all()
         )
+        result = await db.execute(stmt)
+        rows = result.scalars().all()
 
         if not rows:
             return []
@@ -291,14 +295,14 @@ class CollegeFilterMetadataService:
 
         return options
 
-    def _load_branch_specialization_values(
+    async def _load_branch_specialization_values(
         self,
-        db: Session,
+        db: AsyncSession,
         path_id: UUID,
     ) -> List[FilterOptionDTO]:
-        rows = (
-            db.query(ExamProgramServingMap)
-            .filter(
+        stmt = (
+            select(ExamProgramServingMap)
+            .where(
                 ExamProgramServingMap.path_id == path_id,
                 ExamProgramServingMap.specialization_key.isnot(None),
                 ExamProgramServingMap.specialization_label.isnot(None),
@@ -308,8 +312,9 @@ class CollegeFilterMetadataService:
                 ExamProgramServingMap.specialization_key.asc(),
                 ExamProgramServingMap.program_code.asc(),
             )
-            .all()
         )
+        result = await db.execute(stmt)
+        rows = result.scalars().all()
 
         if not rows:
             return []
@@ -342,21 +347,22 @@ class CollegeFilterMetadataService:
 
         return options
 
-    def _load_branch_values_legacy(
+    async def _load_branch_values_legacy(
         self,
-        db: Session,
+        db: AsyncSession,
         path_id: UUID,
     ) -> List[FilterOptionDTO]:
-        rows = (
-            db.query(ExamProgramServingMap)
-            .filter(ExamProgramServingMap.path_id == path_id)
+        stmt = (
+            select(ExamProgramServingMap)
+            .where(ExamProgramServingMap.path_id == path_id)
             .order_by(
                 ExamProgramServingMap.branch_label.asc(),
                 ExamProgramServingMap.branch_option_key.asc(),
                 ExamProgramServingMap.program_code.asc(),
             )
-            .all()
         )
+        result = await db.execute(stmt)
+        rows = result.scalars().all()
 
         if not rows:
             return []
@@ -394,9 +400,9 @@ class CollegeFilterMetadataService:
 
         return options
 
-    def _load_location_placeholder_values(
+    async def _load_location_placeholder_values(
         self,
-        db: Session,
+        db: AsyncSession,
         path_id: UUID,
         filter_key: str,
     ) -> List[FilterOptionDTO]:
@@ -410,23 +416,24 @@ class CollegeFilterMetadataService:
         - pincode: no preloaded dropdown options; frontend uses typed input and reverse autofill
         from district metadata or direct pincode entry
         """
-        ctx = PathValidationService.get_path_only(db=db, path_id=path_id)
+        ctx = await PathValidationService.get_path_only(db=db, path_id=path_id)
         exam_code = (ctx.resolved_exam_code or "").strip()
 
         if not exam_code:
             return []
 
         if filter_key == "state_code":
-            rows = (
-                db.query(SearchReadModel.state_code)
-                .filter(
+            stmt = (
+                select(SearchReadModel.state_code)
+                .where(
                     SearchReadModel.exam_code == exam_code,
                     SearchReadModel.state_code.isnot(None),
                 )
                 .distinct()
                 .order_by(SearchReadModel.state_code.asc())
-                .all()
             )
+            result = await db.execute(stmt)
+            rows = result.all()
 
             options: List[FilterOptionDTO] = []
             for (state_code,) in rows:
@@ -447,13 +454,13 @@ class CollegeFilterMetadataService:
             return options
 
         if filter_key == "district":
-            rows = (
-                db.query(
+            stmt = (
+                select(
                     SearchReadModel.district,
                     SearchReadModel.state_code,
                     SearchReadModel.pincode,
                 )
-                .filter(
+                .where(
                     SearchReadModel.exam_code == exam_code,
                     SearchReadModel.district.isnot(None),
                     SearchReadModel.state_code.isnot(None),
@@ -464,8 +471,9 @@ class CollegeFilterMetadataService:
                     SearchReadModel.district.asc(),
                     SearchReadModel.pincode.asc(),
                 )
-                .all()
             )
+            result = await db.execute(stmt)
+            rows = result.all()
 
             seen = set()
             options: List[FilterOptionDTO] = []

@@ -18,6 +18,10 @@ export function CollegeCard({ item }: CollegeCardProps) {
       item.program_name.trim().toLowerCase();
 
   const shouldRenderHero = Boolean(item.hero_media_url) && !heroFailed;
+  const shouldShowInstituteCode =
+    Boolean(item.institute_code?.trim()) &&
+    item.exam_code !== "JEE_MAIN" &&
+    item.exam_code !== "JEE_ADV";
 
   const toneClass = useMemo(() => {
     const source = item.college_id ?? item.program_code ?? item.college_name;
@@ -45,7 +49,7 @@ export function CollegeCard({ item }: CollegeCardProps) {
       <div className="border-b border-border/70 bg-white/12 p-2.5">
         <div className="overflow-hidden rounded-2xl border border-white/55 bg-white/78 shadow-[inset_0_1px_0_rgba(255,255,255,0.55)]">
           {shouldRenderHero ? (
-            <div className="aspect-[16/8] overflow-hidden xl:aspect-[16/7]">
+            <div className="relative aspect-[16/8] overflow-hidden xl:aspect-[16/7]">
               <img
                 src={item.hero_media_url!}
                 alt={`${item.college_name} campus`}
@@ -53,9 +57,25 @@ export function CollegeCard({ item }: CollegeCardProps) {
                 loading="lazy"
                 onError={() => setHeroFailed(true)}
               />
+
+              {shouldShowInstituteCode ? (
+                <div className="absolute left-3 top-3 max-w-[calc(100%-1.5rem)]">
+                  <div className="inline-flex items-center rounded-full border border-white/60 bg-black/70 px-3 py-1 text-[11px] font-semibold tracking-wide text-white shadow-sm backdrop-blur-sm">
+                    Institute Code: {item.institute_code}
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : (
-            <div className="flex aspect-[16/8] items-center justify-center px-4 text-center text-sm text-muted-foreground xl:aspect-[16/7]">
+            <div className="relative flex aspect-[16/8] items-center justify-center px-4 text-center text-sm text-muted-foreground xl:aspect-[16/7]">
+              {shouldShowInstituteCode ? (
+                <div className="absolute left-3 top-3 max-w-[calc(100%-1.5rem)]">
+                  <div className="inline-flex items-center rounded-full border border-border/70 bg-background/95 px-3 py-1 text-[11px] font-semibold tracking-wide text-foreground shadow-sm">
+                    Institute Code: {item.institute_code}
+                  </div>
+                </div>
+              ) : null}
+
               Campus image will appear here
             </div>
           )}
@@ -69,6 +89,7 @@ export function CollegeCard({ item }: CollegeCardProps) {
               <h3 className="text-[15px] font-semibold leading-snug text-foreground">
                 {item.college_name}
               </h3>
+
               <p className="text-sm text-muted-foreground">{item.program_name}</p>
             </div>
 

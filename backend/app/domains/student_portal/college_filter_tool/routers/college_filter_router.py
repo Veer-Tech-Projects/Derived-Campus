@@ -3,9 +3,9 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import SessionLocal
+from app.database import get_db
 from app.domains.student_portal.college_filter_tool.schemas.runtime_search_schemas import (
     CollegeFilterMetadataResponse,
     CollegeFilterPathCatalogResponse,
@@ -28,34 +28,28 @@ router = APIRouter(
 )
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 @router.get("/paths", response_model=CollegeFilterPathCatalogResponse)
-def get_college_filter_paths(
-    db: Session = Depends(get_db),
+async def get_college_filter_paths(
+    db: AsyncSession = Depends(get_db),
 ):
-    return college_filter_path_catalog_service.build_path_catalog_response(db=db)
+    return await college_filter_path_catalog_service.build_path_catalog_response(db=db)
+
 
 @router.get("/metadata/{path_id}", response_model=CollegeFilterMetadataResponse)
-def get_college_filter_metadata(
+async def get_college_filter_metadata(
     path_id: UUID,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    return college_filter_metadata_service.build_metadata_response(
+    return await college_filter_metadata_service.build_metadata_response(
         db=db,
         path_id=path_id,
     )
 
 
 @router.post("/search", response_model=CollegeFilterSearchResponse)
-def search_college_filter(
+async def search_college_filter(
     request: CollegeFilterSearchRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     runtime_service = CollegeFilterRuntimeService(db)
-    return runtime_service.search(request=request)
+    return await runtime_service.search(request=request)

@@ -4,9 +4,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import UUID
+import logging
+from time import perf_counter
 
 from sqlalchemy import Boolean, Select, and_, cast, false, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     ExamProgramServingMap,
@@ -18,6 +20,7 @@ from app.domains.student_portal.college_filter_tool.services.path_validation_ser
     ResolvedPathContext,
 )
 
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # REPOSITORY DTOs
@@ -113,14 +116,14 @@ class SearchRepository:
 
     SUGGESTED_CANDIDATE_LIMIT = 500
 
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
 
     # --------------------------------------------------------
     # PRIMARY QUERY
     # --------------------------------------------------------
 
-    def search_primary(
+    async def search_primary(
         self,
         *,
         path_context: ResolvedPathContext,
@@ -132,11 +135,17 @@ class SearchRepository:
         - no OFFSET/LIMIT here
         - Step 7D/7E/7F will handle probability, bands, sorting, 200-row caps, and pagination
         """
-        base_query = self._build_primary_base_query(path_context=path_context)
+        overall_started_at = perf_counter()
 
+        base_query = await self._build_primary_base_query(path_context=path_context)
+
+        count_started_at = perf_counter()
         count_stmt = select(func.count()).select_from(base_query.subquery())
-        total_matching_count = int(self.db.execute(count_stmt).scalar() or 0)
+        count_result = await self.db.execute(count_stmt)
+        total_matching_count = int(count_result.scalar() or 0)
+        count_ms = round((perf_counter() - count_started_at) * 1000, 2)
 
+        rows_started_at = perf_counter()
         rows_stmt = base_query.order_by(
             SearchReadModel.comparison_year.desc(),
             SearchReadModel.comparison_round_number.desc(),
@@ -146,10 +155,32 @@ class SearchRepository:
             SearchReadModel.seat_bucket_code.asc(),
         )
 
-        rows = self.db.execute(rows_stmt).scalars().all()
+        rows_result = await self.db.execute(rows_stmt)
+        rows = rows_result.scalars().all()
+        fetch_rows_ms = round((perf_counter() - rows_started_at) * 1000, 2)
+
+        map_started_at = perf_counter()
+        mapped_rows = [self._map_row(row) for row in rows]
+        mapping_ms = round((perf_counter() - map_started_at) * 1000, 2)
+
+        total_ms = round((perf_counter() - overall_started_at) * 1000, 2)
+
+        logger.info(
+            "College-filter primary repository query completed "
+            "path_id=%s path_key=%s total_matching_count=%s fetched_rows=%s "
+            "count_ms=%s fetch_rows_ms=%s mapping_ms=%s total_ms=%s",
+            path_context.path_id,
+            path_context.path_key,
+            total_matching_count,
+            len(mapped_rows),
+            count_ms,
+            fetch_rows_ms,
+            mapping_ms,
+            total_ms,
+        )
 
         return SearchRepositoryResult(
-            rows=[self._map_row(row) for row in rows],
+            rows=mapped_rows,
             total_matching_count=total_matching_count,
         )
 
@@ -157,7 +188,7 @@ class SearchRepository:
     # SUGGESTED CANDIDATE QUERY
     # --------------------------------------------------------
 
-    def search_suggested_candidates(
+    async def search_suggested_candidates(
         self,
         *,
         path_context: ResolvedPathContext,
@@ -172,8 +203,11 @@ class SearchRepository:
         - relax course filter only if path supports course relaxation
         - final probability >= 45 and top-10 trimming happen later
         """
-        base_query = self._build_suggested_base_query(path_context=path_context)
+        overall_started_at = perf_counter()
 
+        base_query = await self._build_suggested_base_query(path_context=path_context)
+
+        rows_started_at = perf_counter()
         rows_stmt = (
             base_query
             .order_by(
@@ -187,15 +221,39 @@ class SearchRepository:
             .limit(self.SUGGESTED_CANDIDATE_LIMIT)
         )
 
-        rows = self.db.execute(rows_stmt).scalars().all()
-        mapped_rows = [self._map_row(row) for row in rows]
+        rows_result = await self.db.execute(rows_stmt)
+        rows = rows_result.scalars().all()
+        fetch_rows_ms = round((perf_counter() - rows_started_at) * 1000, 2)
 
+        map_started_at = perf_counter()
+        mapped_rows = [self._map_row(row) for row in rows]
+        mapping_ms = round((perf_counter() - map_started_at) * 1000, 2)
+
+        exclude_started_at = perf_counter()
         exclude_set = set(exclude_identities)
         filtered_rows = [
             row
             for row in mapped_rows
             if (row.college_id, row.program_code, row.seat_bucket_code) not in exclude_set
         ]
+        exclude_ms = round((perf_counter() - exclude_started_at) * 1000, 2)
+
+        total_ms = round((perf_counter() - overall_started_at) * 1000, 2)
+
+        logger.info(
+            "College-filter suggested repository query completed "
+            "path_id=%s path_key=%s fetched_rows=%s filtered_rows=%s exclude_set_size=%s "
+            "fetch_rows_ms=%s mapping_ms=%s exclude_ms=%s total_ms=%s",
+            path_context.path_id,
+            path_context.path_key,
+            len(rows),
+            len(filtered_rows),
+            len(exclude_set),
+            fetch_rows_ms,
+            mapping_ms,
+            exclude_ms,
+            total_ms,
+        )
 
         return SuggestedRepositoryResult(rows=filtered_rows)
 
@@ -203,7 +261,7 @@ class SearchRepository:
     # INTERNAL QUERY BUILDERS
     # --------------------------------------------------------
 
-    def _build_primary_base_query(
+    async def _build_primary_base_query(
         self,
         *,
         path_context: ResolvedPathContext,
@@ -213,7 +271,7 @@ class SearchRepository:
             SearchReadModel.current_round_cutoff_value.is_not(None),
         )
 
-        stmt = self._apply_common_filters(
+        stmt = await self._apply_common_filters(
             stmt=stmt,
             path_context=path_context,
             filters=path_context.normalized_filters,
@@ -223,7 +281,7 @@ class SearchRepository:
 
         return stmt
 
-    def _build_suggested_base_query(
+    async def _build_suggested_base_query(
         self,
         *,
         path_context: ResolvedPathContext,
@@ -233,7 +291,7 @@ class SearchRepository:
             SearchReadModel.current_round_cutoff_value.is_not(None),
         )
 
-        stmt = self._apply_common_filters(
+        stmt = await self._apply_common_filters(
             stmt=stmt,
             path_context=path_context,
             filters=path_context.normalized_filters,
@@ -247,7 +305,7 @@ class SearchRepository:
     # FILTER APPLICATION
     # --------------------------------------------------------
 
-    def _apply_common_filters(
+    async def _apply_common_filters(
         self,
         *,
         stmt: Select,
@@ -310,7 +368,7 @@ class SearchRepository:
         variant_value = self._string_filter(filters, "variant")
 
         if branch_value and not relax_branch_filter:
-            matched_program_codes = self._resolve_program_codes_for_branch_selection(
+            matched_program_codes = await self._resolve_program_codes_for_branch_selection(
                 path_id=path_context.path_id,
                 branch_value=branch_value,
                 variant_value=variant_value,
@@ -502,7 +560,7 @@ class SearchRepository:
         """
         return func.replace(func.lower(func.coalesce(sql_expr, "")), " ", "_")
 
-    def _resolve_program_codes_for_branch_selection(
+    async def _resolve_program_codes_for_branch_selection(
         self,
         *,
         path_id: UUID,
@@ -519,9 +577,9 @@ class SearchRepository:
         """
         normalized_branch = self._normalize_branch_key(branch_value)
 
-        query = (
-            self.db.query(ExamProgramServingMap.program_code)
-            .filter(
+        stmt = (
+            select(ExamProgramServingMap.program_code)
+            .where(
                 ExamProgramServingMap.path_id == path_id,
                 func.lower(ExamProgramServingMap.branch_discipline_key) == normalized_branch,
             )
@@ -530,11 +588,12 @@ class SearchRepository:
 
         if variant_value is not None:
             normalized_variant = self._normalize_branch_key(variant_value)
-            query = query.filter(
+            stmt = stmt.where(
                 func.lower(ExamProgramServingMap.specialization_key) == normalized_variant
             )
 
-        rows = query.all()
+        result = await self.db.execute(stmt)
+        rows = result.all()
         return [str(program_code) for (program_code,) in rows if program_code]
 
     @staticmethod

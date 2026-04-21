@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from typing import List
+from time import perf_counter
+from typing import List, Optional
+from uuid import UUID
 
-from sqlalchemy.orm import Session
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.student_portal.college_filter_tool.schemas.runtime_search_schemas import (
     BandCountsDTO,
@@ -25,6 +30,8 @@ from app.domains.student_portal.college_filter_tool.repositories.search_reposito
 )
 from app.domains.student_portal.college_filter_tool.services.band_classifier import (
     BandClassifier,
+    BandDecision,
+    SuggestedEligibility,
 )
 from app.domains.student_portal.college_filter_tool.services.band_pagination_service import (
     BandPaginationService,
@@ -35,7 +42,10 @@ from app.domains.student_portal.college_filter_tool.services.best_fit_sort_servi
     RankedCandidate,
 )
 from app.domains.student_portal.college_filter_tool.services.metric_comparison_service import (
+    ConfidenceAnalysis,
+    MarginAnalysis,
     MetricComparisonService,
+    RuntimeComparisonSnapshot,
 )
 from app.domains.student_portal.college_filter_tool.services.path_validation_service import (
     PathValidationService,
@@ -45,11 +55,185 @@ from app.domains.student_portal.college_filter_tool.services.policy_resolution_s
     PolicyResolutionService,
 )
 from app.domains.student_portal.college_filter_tool.services.probability_engine import (
+    ProbabilityAnalysis,
     ProbabilityEngine,
+)
+from app.domains.student_portal.college_filter_tool.services.search_snapshot_cache_service import (
+    college_filter_search_snapshot_cache_service,
 )
 
 
+logger = logging.getLogger(__name__)
+
 DECIMAL_FOUR_PLACES = Decimal("0.0001")
+
+
+# ======================================================
+# RUNTIME-ONLY INTERNAL SNAPSHOT DATACLASSES
+# ======================================================
+
+@dataclass(frozen=True)
+class ComputedSearchSnapshotRuntime:
+    fingerprint: str
+    path: PathSummaryDTO
+    user_score: Decimal
+    safe_sorted: List[RankedCandidate]
+    moderate_sorted: List[RankedCandidate]
+    hard_sorted: List[RankedCandidate]
+    suggested_sorted: List[RankedCandidate]
+    total_matching_count: int
+    generated_at: datetime
+    primary_row_count: int
+    suggested_row_count: int
+
+
+# ======================================================
+# Pydantic snapshot models for Redis-safe serialization
+# ======================================================
+
+class PathSummarySnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path_id: UUID
+    path_key: str
+    visible_label: str
+    exam_family: str
+    resolved_exam_code: Optional[str] = None
+    education_type: Optional[str] = None
+    selection_type: Optional[str] = None
+    metric_type: str
+    expected_max_rounds: int
+    supports_branch: bool
+    supports_course_relaxation: bool
+    supports_location_filter: bool
+    supports_opening_rank: bool
+
+
+class SearchRepositoryRowSnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    path_id: UUID
+    path_key: str
+    exam_code: str
+
+    live_round_number: int
+    comparison_year: int
+    comparison_round_number: int
+
+    college_id: UUID
+    college_name: str
+    institute_code: str
+    institute_name: str
+
+    program_code: str
+    program_name: str
+    branch_option_key: Optional[str] = None
+
+    seat_bucket_code: str
+    category_name: Optional[str] = None
+    reservation_type: Optional[str] = None
+    location_type: Optional[str] = None
+    course_type: Optional[str] = None
+
+    state_code: Optional[str] = None
+    district: Optional[str] = None
+    pincode: Optional[str] = None
+
+    hero_storage_key: Optional[str] = None
+    hero_public_url: Optional[str] = None
+
+    current_round_cutoff_value: Optional[Decimal] = None
+    is_projected_current_round: bool
+
+    opening_rank: Optional[Decimal] = None
+
+    latest_year_available: int
+    latest_round_available: int
+
+
+class MarginAnalysisSnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    metric_type: str
+    user_score: Decimal
+    current_round_cutoff_value: Decimal
+    raw_margin: Decimal
+    normalized_margin_ratio: Decimal
+    absolute_gap_ratio: Decimal
+    qualified_against_current_anchor: bool
+
+
+class ConfidenceAnalysisSnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    round_evidence_score: Decimal
+    round_stability_score: Decimal
+    current_year_presence_score: Decimal
+    weighted_confidence: Decimal
+    is_cold_start: bool
+
+
+class RuntimeComparisonSnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    margin: MarginAnalysisSnapshotModel
+    confidence: ConfidenceAnalysisSnapshotModel
+
+
+class ProbabilityAnalysisSnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    normalized_margin_ratio: Decimal
+    weighted_confidence: Decimal
+    margin_component: Decimal
+    confidence_component: Decimal
+    blended_signal: Decimal
+    raw_probability: Decimal
+    bounded_probability: Decimal
+    cold_start_capped: bool
+
+
+class BandDecisionSnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    band: Optional[CollegeBand] = None
+    reason: str
+
+
+class SuggestedEligibilitySnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    eligible: bool
+    adjusted_margin_ratio: Decimal
+    adjusted_probability: Decimal
+    reason: str
+
+
+class RankedCandidateSnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    row: SearchRepositoryRowSnapshotModel
+    snapshot: RuntimeComparisonSnapshotModel
+    probability: ProbabilityAnalysisSnapshotModel
+    band_decision: BandDecisionSnapshotModel
+    suggested_eligibility: Optional[SuggestedEligibilitySnapshotModel] = None
+
+
+class ComputedSearchSnapshotModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fingerprint: str
+    path: PathSummarySnapshotModel
+    user_score: Decimal
+    safe_sorted: List[RankedCandidateSnapshotModel]
+    moderate_sorted: List[RankedCandidateSnapshotModel]
+    hard_sorted: List[RankedCandidateSnapshotModel]
+    suggested_sorted: List[RankedCandidateSnapshotModel]
+    total_matching_count: int
+    generated_at: datetime
+    primary_row_count: int
+    suggested_row_count: int
 
 
 class CollegeFilterRuntimeService:
@@ -67,7 +251,7 @@ class CollegeFilterRuntimeService:
     - map runtime results into the final API DTO
     """
 
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
         self.repository = SearchRepository(db)
         self.policy_resolution_service = PolicyResolutionService(db)
@@ -77,49 +261,152 @@ class CollegeFilterRuntimeService:
         self.best_fit_sort_service = BestFitSortService()
         self.band_pagination_service = BandPaginationService()
 
-    def search(
+    async def search(
         self,
         *,
         request: CollegeFilterSearchRequest,
     ) -> CollegeFilterSearchResponse:
-        path_context = PathValidationService.resolve_and_validate(
+        total_started_at = perf_counter()
+        cache_status = "miss"
+
+        fingerprint = college_filter_search_snapshot_cache_service.build_fingerprint(
+            path_id=str(request.path_id),
+            score=request.score,
+            filters=request.filters,
+            sort_mode=request.sort_mode.value,
+        )
+
+        snapshot_model: ComputedSearchSnapshotModel | None = None
+        cached_payload = college_filter_search_snapshot_cache_service.load_snapshot_json(
+            fingerprint=fingerprint
+        )
+
+        if cached_payload:
+            try:
+                snapshot_model = ComputedSearchSnapshotModel.model_validate_json(
+                    cached_payload
+                )
+                cache_status = "hit"
+            except Exception:
+                logger.exception(
+                    "College-filter snapshot payload validation failed. Recomputing fresh. "
+                    "fingerprint=%s",
+                    fingerprint,
+                )
+                cache_status = "invalid_payload"
+                snapshot_model = None
+
+        if snapshot_model is None:
+            runtime_snapshot = await self._compute_search_snapshot_runtime(
+                request=request,
+                fingerprint=fingerprint,
+            )
+            snapshot_model = self._to_snapshot_model(runtime_snapshot)
+
+            try:
+                college_filter_search_snapshot_cache_service.store_snapshot_json(
+                    fingerprint=fingerprint,
+                    payload_json=snapshot_model.model_dump_json(),
+                )
+            except Exception:
+                # service already fails open; this is just an extra safety belt
+                logger.exception(
+                    "College-filter snapshot store raised unexpectedly for fingerprint=%s",
+                    fingerprint,
+                )
+                cache_status = (
+                    "store_failed_after_invalid_payload"
+                    if cache_status == "invalid_payload"
+                    else "store_failed"
+                )
+            else:
+                if cache_status != "invalid_payload":
+                    cache_status = "miss"
+
+        pagination_started_at = perf_counter()
+        response = self._build_response_from_snapshot_model(
+            snapshot_model=snapshot_model,
+            page_size=request.page_size,
+            page_by_band=request.page_by_band,
+        )
+        pagination_ms = round((perf_counter() - pagination_started_at) * 1000, 2)
+        total_search_ms = round((perf_counter() - total_started_at) * 1000, 2)
+
+        logger.info(
+            "College-filter search completed "
+            "fingerprint=%s cache_status=%s path_id=%s path_key=%s "
+            "primary_rows=%s suggested_rows=%s safe_count=%s moderate_count=%s hard_count=%s suggested_count=%s "
+            "pagination_ms=%s total_search_ms=%s",
+            fingerprint,
+            cache_status,
+            snapshot_model.path.path_id,
+            snapshot_model.path.path_key,
+            snapshot_model.primary_row_count,
+            snapshot_model.suggested_row_count,
+            len(snapshot_model.safe_sorted),
+            len(snapshot_model.moderate_sorted),
+            len(snapshot_model.hard_sorted),
+            len(snapshot_model.suggested_sorted),
+            pagination_ms,
+            total_search_ms,
+        )
+
+        return response
+
+    # ======================================================
+    # SNAPSHOT COMPUTATION
+    # ======================================================
+
+    async def _compute_search_snapshot_runtime(
+        self,
+        *,
+        request: CollegeFilterSearchRequest,
+        fingerprint: str,
+    ) -> ComputedSearchSnapshotRuntime:
+        validation_started_at = perf_counter()
+        path_context = await PathValidationService.resolve_and_validate(
             db=self.db,
             request=request,
         )
+        path_validation_ms = round((perf_counter() - validation_started_at) * 1000, 2)
 
-        # --------------------------------------------------
-        # 1. Primary candidate set
-        # --------------------------------------------------
-        primary_result = self.repository.search_primary(
+        primary_query_started_at = perf_counter()
+        primary_result = await self.repository.search_primary(
             path_context=path_context,
         )
+        primary_query_ms = round((perf_counter() - primary_query_started_at) * 1000, 2)
 
-        primary_ranked_candidates = self._score_primary_rows(
+        primary_scoring_started_at = perf_counter()
+        primary_ranked_candidates = await self._score_primary_rows(
             path_context=path_context,
             rows=primary_result.rows,
         )
+        primary_scoring_ms = round((perf_counter() - primary_scoring_started_at) * 1000, 2)
 
-        # --------------------------------------------------
-        # 2. Suggested candidate set
-        # --------------------------------------------------
         primary_identity_set = {
-            (candidate.row.college_id, candidate.row.program_code, candidate.row.seat_bucket_code)
+            (
+                candidate.row.college_id,
+                candidate.row.program_code,
+                candidate.row.seat_bucket_code,
+            )
             for candidate in primary_ranked_candidates
         }
 
-        suggested_result = self.repository.search_suggested_candidates(
+        suggested_query_started_at = perf_counter()
+        suggested_result = await self.repository.search_suggested_candidates(
             path_context=path_context,
             exclude_identities=primary_identity_set,
         )
+        suggested_query_ms = round((perf_counter() - suggested_query_started_at) * 1000, 2)
 
-        suggested_ranked_candidates = self._score_suggested_rows(
+        suggested_scoring_started_at = perf_counter()
+        suggested_ranked_candidates = await self._score_suggested_rows(
             path_context=path_context,
             rows=suggested_result.rows,
         )
+        suggested_scoring_ms = round((perf_counter() - suggested_scoring_started_at) * 1000, 2)
 
-        # --------------------------------------------------
-        # 3. Sort by band / suggestion logic
-        # --------------------------------------------------
+        sorting_started_at = perf_counter()
         safe_sorted = self.best_fit_sort_service.sort_primary_band(
             candidates=primary_ranked_candidates,
             band=CollegeBand.SAFE,
@@ -135,69 +422,58 @@ class CollegeFilterRuntimeService:
         suggested_sorted = self.best_fit_sort_service.sort_suggested(
             candidates=suggested_ranked_candidates,
         )
-
-        # --------------------------------------------------
-        # 4. Apply cap + page slicing
-        # --------------------------------------------------
-        paginated = self.band_pagination_service.paginate_all_bands(
-            safe_candidates=safe_sorted,
-            moderate_candidates=moderate_sorted,
-            hard_candidates=hard_sorted,
-            suggested_candidates=suggested_sorted,
-            page_request=request.page_by_band,
-            page_size=request.page_size,
-        )
-
-        # --------------------------------------------------
-        # 5. Aggregate counts
-        # --------------------------------------------------
-        band_counts = BandCountsDTO(
-            safe=len(safe_sorted),
-            moderate=len(moderate_sorted),
-            hard=len(hard_sorted),
-            suggested=paginated[CollegeBand.SUGGESTED].capped_total_available,
-        )
+        sorting_ms = round((perf_counter() - sorting_started_at) * 1000, 2)
 
         total_matching_count = (
-            band_counts.safe
-            + band_counts.moderate
-            + band_counts.hard
+            len(safe_sorted)
+            + len(moderate_sorted)
+            + len(hard_sorted)
         )
 
-        # --------------------------------------------------
-        # 6. DTO mapping
-        # --------------------------------------------------
-        return CollegeFilterSearchResponse(
+        snapshot = ComputedSearchSnapshotRuntime(
+            fingerprint=fingerprint,
             path=self._build_path_summary(path_context),
             user_score=request.score.quantize(DECIMAL_FOUR_PLACES, rounding=ROUND_HALF_UP),
+            safe_sorted=safe_sorted,
+            moderate_sorted=moderate_sorted,
+            hard_sorted=hard_sorted,
+            suggested_sorted=suggested_sorted,
             total_matching_count=total_matching_count,
-            band_counts=band_counts,
-            bands=SearchBandsDTO(
-                safe=self._map_paginated_band_slice(
-                    band=CollegeBand.SAFE,
-                    paginated_slice=paginated[CollegeBand.SAFE],
-                ),
-                moderate=self._map_paginated_band_slice(
-                    band=CollegeBand.MODERATE,
-                    paginated_slice=paginated[CollegeBand.MODERATE],
-                ),
-                hard=self._map_paginated_band_slice(
-                    band=CollegeBand.HARD,
-                    paginated_slice=paginated[CollegeBand.HARD],
-                ),
-                suggested=self._map_paginated_band_slice(
-                    band=CollegeBand.SUGGESTED,
-                    paginated_slice=paginated[CollegeBand.SUGGESTED],
-                ),
-            ),
             generated_at=datetime.now(timezone.utc),
+            primary_row_count=len(primary_result.rows),
+            suggested_row_count=len(suggested_result.rows),
         )
+
+        logger.info(
+            "College-filter runtime snapshot computed "
+            "fingerprint=%s path_id=%s path_key=%s "
+            "path_validation_ms=%s primary_query_ms=%s primary_scoring_ms=%s "
+            "suggested_query_ms=%s suggested_scoring_ms=%s sorting_ms=%s "
+            "primary_rows=%s suggested_rows=%s safe_count=%s moderate_count=%s hard_count=%s suggested_count=%s",
+            fingerprint,
+            snapshot.path.path_id,
+            snapshot.path.path_key,
+            path_validation_ms,
+            primary_query_ms,
+            primary_scoring_ms,
+            suggested_query_ms,
+            suggested_scoring_ms,
+            sorting_ms,
+            snapshot.primary_row_count,
+            snapshot.suggested_row_count,
+            len(snapshot.safe_sorted),
+            len(snapshot.moderate_sorted),
+            len(snapshot.hard_sorted),
+            len(snapshot.suggested_sorted),
+        )
+
+        return snapshot
 
     # ======================================================
     # PRIMARY / SUGGESTED SCORING
     # ======================================================
 
-    def _score_primary_rows(
+    async def _score_primary_rows(
         self,
         *,
         path_context: ResolvedPathContext,
@@ -206,7 +482,7 @@ class CollegeFilterRuntimeService:
         if not rows:
             return []
 
-        policies_by_row_id = self.policy_resolution_service.resolve_map_for_rows(rows)
+        policies_by_row_id = await self.policy_resolution_service.resolve_map_for_rows(rows)
 
         ranked_candidates: List[RankedCandidate] = []
         for row in rows:
@@ -239,7 +515,7 @@ class CollegeFilterRuntimeService:
 
         return ranked_candidates
 
-    def _score_suggested_rows(
+    async def _score_suggested_rows(
         self,
         *,
         path_context: ResolvedPathContext,
@@ -248,7 +524,7 @@ class CollegeFilterRuntimeService:
         if not rows:
             return []
 
-        policies_by_row_id = self.policy_resolution_service.resolve_map_for_rows(rows)
+        policies_by_row_id = await self.policy_resolution_service.resolve_map_for_rows(rows)
 
         ranked_candidates: List[RankedCandidate] = []
         for row in rows:
@@ -287,6 +563,198 @@ class CollegeFilterRuntimeService:
         return ranked_candidates
 
     # ======================================================
+    # SNAPSHOT MODEL BRIDGE
+    # ======================================================
+
+    def _to_snapshot_model(
+        self,
+        runtime_snapshot: ComputedSearchSnapshotRuntime,
+    ) -> ComputedSearchSnapshotModel:
+        return ComputedSearchSnapshotModel(
+            fingerprint=runtime_snapshot.fingerprint,
+            path=PathSummarySnapshotModel(
+                path_id=runtime_snapshot.path.path_id,
+                path_key=runtime_snapshot.path.path_key,
+                visible_label=runtime_snapshot.path.visible_label,
+                exam_family=runtime_snapshot.path.exam_family,
+                resolved_exam_code=runtime_snapshot.path.resolved_exam_code,
+                education_type=runtime_snapshot.path.education_type,
+                selection_type=runtime_snapshot.path.selection_type,
+                metric_type=runtime_snapshot.path.metric_type.value,
+                expected_max_rounds=runtime_snapshot.path.expected_max_rounds,
+                supports_branch=runtime_snapshot.path.supports_branch,
+                supports_course_relaxation=runtime_snapshot.path.supports_course_relaxation,
+                supports_location_filter=runtime_snapshot.path.supports_location_filter,
+                supports_opening_rank=runtime_snapshot.path.supports_opening_rank,
+            ),
+            user_score=runtime_snapshot.user_score,
+            safe_sorted=[self._to_snapshot_candidate_model(candidate) for candidate in runtime_snapshot.safe_sorted],
+            moderate_sorted=[self._to_snapshot_candidate_model(candidate) for candidate in runtime_snapshot.moderate_sorted],
+            hard_sorted=[self._to_snapshot_candidate_model(candidate) for candidate in runtime_snapshot.hard_sorted],
+            suggested_sorted=[self._to_snapshot_candidate_model(candidate) for candidate in runtime_snapshot.suggested_sorted],
+            total_matching_count=runtime_snapshot.total_matching_count,
+            generated_at=runtime_snapshot.generated_at,
+            primary_row_count=runtime_snapshot.primary_row_count,
+            suggested_row_count=runtime_snapshot.suggested_row_count,
+        )
+
+    def _to_snapshot_candidate_model(
+        self,
+        candidate: RankedCandidate,
+    ) -> RankedCandidateSnapshotModel:
+        row = candidate.row
+        snapshot = candidate.snapshot
+        probability = candidate.probability
+
+        suggested_eligibility_model = None
+        if candidate.suggested_eligibility is not None:
+            suggested_eligibility_model = SuggestedEligibilitySnapshotModel(
+                eligible=bool(candidate.suggested_eligibility.eligible),
+                adjusted_margin_ratio=Decimal(candidate.suggested_eligibility.adjusted_margin_ratio),
+                adjusted_probability=Decimal(candidate.suggested_eligibility.adjusted_probability),
+                reason=candidate.suggested_eligibility.reason,
+            )
+
+        return RankedCandidateSnapshotModel(
+            row=SearchRepositoryRowSnapshotModel(
+                id=row.id,
+                path_id=row.path_id,
+                path_key=row.path_key,
+                exam_code=row.exam_code,
+                live_round_number=row.live_round_number,
+                comparison_year=row.comparison_year,
+                comparison_round_number=row.comparison_round_number,
+                college_id=row.college_id,
+                college_name=row.college_name,
+                institute_code=row.institute_code,
+                institute_name=row.institute_name,
+                program_code=row.program_code,
+                program_name=row.program_name,
+                branch_option_key=row.branch_option_key,
+                seat_bucket_code=row.seat_bucket_code,
+                category_name=row.category_name,
+                reservation_type=row.reservation_type,
+                location_type=row.location_type,
+                course_type=row.course_type,
+                state_code=row.state_code,
+                district=row.district,
+                pincode=row.pincode,
+                hero_storage_key=row.hero_storage_key,
+                hero_public_url=row.hero_public_url,
+                current_round_cutoff_value=row.current_round_cutoff_value,
+                is_projected_current_round=bool(row.is_projected_current_round),
+                opening_rank=row.opening_rank,
+                latest_year_available=row.latest_year_available,
+                latest_round_available=row.latest_round_available,
+            ),
+            snapshot=RuntimeComparisonSnapshotModel(
+                margin=MarginAnalysisSnapshotModel(
+                    metric_type=snapshot.margin.metric_type.value,
+                    user_score=Decimal(snapshot.margin.user_score),
+                    current_round_cutoff_value=Decimal(snapshot.margin.current_round_cutoff_value),
+                    raw_margin=Decimal(snapshot.margin.raw_margin),
+                    normalized_margin_ratio=Decimal(snapshot.margin.normalized_margin_ratio),
+                    absolute_gap_ratio=Decimal(snapshot.margin.absolute_gap_ratio),
+                    qualified_against_current_anchor=bool(
+                        snapshot.margin.qualified_against_current_anchor
+                    ),
+                ),
+                confidence=ConfidenceAnalysisSnapshotModel(
+                    round_evidence_score=Decimal(snapshot.confidence.round_evidence_score),
+                    round_stability_score=Decimal(snapshot.confidence.round_stability_score),
+                    current_year_presence_score=Decimal(snapshot.confidence.current_year_presence_score),
+                    weighted_confidence=Decimal(snapshot.confidence.weighted_confidence),
+                    is_cold_start=bool(snapshot.confidence.is_cold_start),
+                ),
+            ),
+            probability=ProbabilityAnalysisSnapshotModel(
+                normalized_margin_ratio=Decimal(probability.normalized_margin_ratio),
+                weighted_confidence=Decimal(probability.weighted_confidence),
+                margin_component=Decimal(probability.margin_component),
+                confidence_component=Decimal(probability.confidence_component),
+                blended_signal=Decimal(probability.blended_signal),
+                raw_probability=Decimal(probability.raw_probability),
+                bounded_probability=Decimal(probability.bounded_probability),
+                cold_start_capped=bool(probability.cold_start_capped),
+            ),
+            band_decision=BandDecisionSnapshotModel(
+                band=candidate.band_decision.band,
+                reason=candidate.band_decision.reason,
+            ),
+            suggested_eligibility=suggested_eligibility_model,
+        )
+
+    # ======================================================
+    # RESPONSE MATERIALIZATION FROM SNAPSHOT MODEL
+    # ======================================================
+
+    def _build_response_from_snapshot_model(
+        self,
+        *,
+        snapshot_model: ComputedSearchSnapshotModel,
+        page_size: int,
+        page_by_band,
+    ) -> CollegeFilterSearchResponse:
+        paginated = self.band_pagination_service.paginate_all_bands(
+            safe_candidates=snapshot_model.safe_sorted,
+            moderate_candidates=snapshot_model.moderate_sorted,
+            hard_candidates=snapshot_model.hard_sorted,
+            suggested_candidates=snapshot_model.suggested_sorted,
+            page_request=page_by_band,
+            page_size=page_size,
+        )
+
+        band_counts = BandCountsDTO(
+            safe=len(snapshot_model.safe_sorted),
+            moderate=len(snapshot_model.moderate_sorted),
+            hard=len(snapshot_model.hard_sorted),
+            suggested=paginated[CollegeBand.SUGGESTED].capped_total_available,
+        )
+
+        return CollegeFilterSearchResponse(
+            path=PathSummaryDTO(
+                path_id=snapshot_model.path.path_id,
+                path_key=snapshot_model.path.path_key,
+                visible_label=snapshot_model.path.visible_label,
+                exam_family=snapshot_model.path.exam_family,
+                resolved_exam_code=snapshot_model.path.resolved_exam_code,
+                education_type=snapshot_model.path.education_type,
+                selection_type=snapshot_model.path.selection_type,
+                metric_type=snapshot_model.path.metric_type,
+                expected_max_rounds=snapshot_model.path.expected_max_rounds,
+                supports_branch=snapshot_model.path.supports_branch,
+                supports_course_relaxation=snapshot_model.path.supports_course_relaxation,
+                supports_location_filter=snapshot_model.path.supports_location_filter,
+                supports_opening_rank=snapshot_model.path.supports_opening_rank,
+            ),
+            user_score=Decimal(snapshot_model.user_score).quantize(
+                DECIMAL_FOUR_PLACES,
+                rounding=ROUND_HALF_UP,
+            ),
+            total_matching_count=snapshot_model.total_matching_count,
+            band_counts=band_counts,
+            bands=SearchBandsDTO(
+                safe=self._map_snapshot_paginated_band_slice(
+                    band=CollegeBand.SAFE,
+                    paginated_slice=paginated[CollegeBand.SAFE],
+                ),
+                moderate=self._map_snapshot_paginated_band_slice(
+                    band=CollegeBand.MODERATE,
+                    paginated_slice=paginated[CollegeBand.MODERATE],
+                ),
+                hard=self._map_snapshot_paginated_band_slice(
+                    band=CollegeBand.HARD,
+                    paginated_slice=paginated[CollegeBand.HARD],
+                ),
+                suggested=self._map_snapshot_paginated_band_slice(
+                    band=CollegeBand.SUGGESTED,
+                    paginated_slice=paginated[CollegeBand.SUGGESTED],
+                ),
+            ),
+            generated_at=snapshot_model.generated_at,
+        )
+
+    # ======================================================
     # DTO MAPPING
     # ======================================================
 
@@ -310,7 +778,7 @@ class CollegeFilterRuntimeService:
             supports_opening_rank=path_context.supports_opening_rank,
         )
 
-    def _map_paginated_band_slice(
+    def _map_snapshot_paginated_band_slice(
         self,
         *,
         band: CollegeBand,
@@ -319,7 +787,7 @@ class CollegeFilterRuntimeService:
         return BandResultDTO(
             band=band,
             items=[
-                self._map_ranked_candidate_to_card(
+                self._map_snapshot_candidate_to_card(
                     band=band,
                     candidate=candidate,
                 )
@@ -335,11 +803,11 @@ class CollegeFilterRuntimeService:
             ),
         )
 
-    def _map_ranked_candidate_to_card(
+    def _map_snapshot_candidate_to_card(
         self,
         *,
         band: CollegeBand,
-        candidate: RankedCandidate,
+        candidate: RankedCandidateSnapshotModel,
     ) -> CollegeCardDTO:
         row = candidate.row
         snapshot = candidate.snapshot

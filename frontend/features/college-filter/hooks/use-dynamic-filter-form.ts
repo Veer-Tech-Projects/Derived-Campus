@@ -122,6 +122,7 @@ export function useDynamicFilterForm({
          */
         if (filterKey === "state_code") {
           delete next["district"];
+          delete next["pincode"];
         }
 
         if (filterKey === "district") {

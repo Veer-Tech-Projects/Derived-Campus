@@ -60,22 +60,38 @@ export function SearchStatusPanel({
     lines.push("");
 
     activeItems.forEach((item, index) => {
-      lines.push(`${index + 1}. ${item.college_name}`);
+      lines.push(`${index + 1}.`);
 
-      addCopyLine(lines, "Program", item.program_name);
+      if (shouldIncludeInstituteCode(item)) {
+        addCopyLine(lines, "Institute Code", item.institute_code);
+      }
+
+      addCopyLine(lines, "College Name", item.college_name);
+
+      if (item.course_type) {
+        addCopyLine(lines, "Course Type", item.course_type);
+      }
+
+      addCopyLine(lines, "Program Name", item.program_name);
       addCopyLine(lines, "Band", item.band);
-      addCopyLine(lines, "Current Cutoff", formatMetricValue(item.current_round_cutoff_value, false));
-      addCopyLine(lines, "Probability", formatMetricValue(item.probability_percent, true));
+      addCopyLine(
+        lines,
+        "Current Cutoff",
+        formatMetricValue(item.current_round_cutoff_value, false)
+      );
 
       if (item.opening_rank !== null && item.opening_rank !== undefined) {
         addCopyLine(lines, "Opening Rank", String(item.opening_rank));
       }
 
+      addCopyLine(
+        lines,
+        "Probability",
+        formatMetricValue(item.probability_percent, true)
+      );
+
       if (item.location_type) {
         addCopyLine(lines, "Location Type", item.location_type);
-      }
-      if (item.course_type) {
-        addCopyLine(lines, "Course Type", item.course_type);
       }
       if (item.category_name) {
         addCopyLine(lines, "Category", item.category_name);
@@ -184,6 +200,14 @@ export function SearchStatusPanel({
         />
       </div>
     </div>
+  );
+}
+
+function shouldIncludeInstituteCode(item: CollegeCardDTO): boolean {
+  return (
+    Boolean(item.institute_code?.trim()) &&
+    item.exam_code !== "JEE_MAIN" &&
+    item.exam_code !== "JEE_ADV"
   );
 }
 

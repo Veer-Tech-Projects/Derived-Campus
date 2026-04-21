@@ -25,7 +25,10 @@ import { useCollegeFilterSearchQuery } from "../../hooks/use-college-filter-sear
 import { usePathSelection } from "../../hooks/use-path-selection";
 import { useFollowStepsVisibility } from "../../hooks/use-follow-steps";
 import { useCollegeFilterUiStore } from "../../state/use-college-filter-ui-store";
-import { FilterPanelSkeleton } from "../shared/skeletons";
+import {
+  DynamicFilterPanelSkeleton,
+  SelectionPanelSkeleton,
+} from "../shared/skeletons";
 import {
   decodeCollegeFilterUrlState,
   encodeCollegeFilterUrlState,
@@ -34,9 +37,48 @@ import {
 import {
   BandPageRequest,
   CollegeBand,
+  CollegeFilterSearchRequest,
   CollegeFilterSearchResponse,
   UUID,
 } from "../../types/contracts";
+
+function buildStableRequestKey(payload: CollegeFilterSearchRequest): string {
+  const normalizedFilters = Object.keys(payload.filters)
+    .sort()
+    .reduce<Record<string, string>>((acc, key) => {
+      const rawValue = payload.filters[key];
+      const normalizedKey = key.trim();
+
+      if (!normalizedKey) {
+        return acc;
+      }
+
+      const value =
+        typeof rawValue === "string" ? rawValue : String(rawValue ?? "");
+      const normalizedValue = value.trim();
+
+      if (!normalizedValue) {
+        return acc;
+      }
+
+      acc[normalizedKey] = normalizedValue;
+      return acc;
+    }, {});
+
+  return JSON.stringify({
+    path_id: payload.path_id,
+    score: payload.score.trim(),
+    filters: normalizedFilters,
+    sort_mode: payload.sort_mode,
+    page_by_band: {
+      safe: payload.page_by_band.safe,
+      moderate: payload.page_by_band.moderate,
+      hard: payload.page_by_band.hard,
+      suggested: payload.page_by_band.suggested,
+    },
+    page_size: payload.page_size,
+  });
+}
 
 export function CollegeFilterPageShell() {
   const router = useRouter();
@@ -50,6 +92,9 @@ export function CollegeFilterPageShell() {
 
   const hasHydratedFromUrlRef = useRef(false);
   const hasRestoredAppliedSearchRef = useRef(false);
+  const activeRequestKeyRef = useRef<string | null>(null);
+  const latestIssuedRequestIdRef = useRef(0);
+  const latestCommittedRequestIdRef = useRef(0);
 
   const [selectedRootPathId, setSelectedRootPathId] = useState<UUID | null>(null);
   const [selectedEducationType, setSelectedEducationType] = useState<string | null>(null);
@@ -254,6 +299,62 @@ export function CollegeFilterPageShell() {
     setPageByBand(COLLEGE_FILTER_DEFAULT_BAND_PAGES);
   }, [hasExecutedSearch, resultsAreStale]);
 
+  const isCurrentDraftApplied = useMemo(() => {
+    if (!hasExecutedSearch) return false;
+    if (!appliedSearchState?.applied) return false;
+    if (!lastExecutedSearchFingerprint) return false;
+
+    return currentSearchFingerprint === lastExecutedSearchFingerprint;
+  }, [
+    appliedSearchState,
+    currentSearchFingerprint,
+    hasExecutedSearch,
+    lastExecutedSearchFingerprint,
+  ]);
+
+  const executeGuardedSearch = useCallback(
+    async ({
+      payload,
+      onSuccess,
+      onError,
+    }: {
+      payload: CollegeFilterSearchRequest;
+      onSuccess: (result: Awaited<ReturnType<typeof searchMutation.mutateAsync>>, requestId: number) => void;
+      onError: (message: string, requestId: number) => void;
+    }) => {
+      const requestKey = buildStableRequestKey(payload);
+
+      if (activeRequestKeyRef.current === requestKey) {
+        return;
+      }
+
+      const requestId = ++latestIssuedRequestIdRef.current;
+      activeRequestKeyRef.current = requestKey;
+
+      try {
+        const result = await searchMutation.mutateAsync(payload);
+
+        if (requestId !== latestIssuedRequestIdRef.current) {
+          return;
+        }
+
+        latestCommittedRequestIdRef.current = requestId;
+        onSuccess(result, requestId);
+      } catch (error) {
+        if (requestId !== latestIssuedRequestIdRef.current) {
+          return;
+        }
+
+        onError(normalizeApiError(error), requestId);
+      } finally {
+        if (activeRequestKeyRef.current === requestKey) {
+          activeRequestKeyRef.current = null;
+        }
+      }
+    },
+    [searchMutation]
+  );
+
   useEffect(() => {
     if (!hasHydratedFromUrlRef.current) return;
     if (hasRestoredAppliedSearchRef.current) return;
@@ -261,7 +362,7 @@ export function CollegeFilterPageShell() {
 
     const appliedFinalPathId = appliedSearchState.finalPathId;
     const appliedScore = appliedSearchState.score;
-    const appliedFilters = appliedSearchState.filters;
+    const appliedFilters = appliedSearchState.filters;  
     const appliedPageByBand = appliedSearchState.pageByBand;
     const appliedActiveBand = appliedSearchState.activeBand;
 
@@ -270,41 +371,37 @@ export function CollegeFilterPageShell() {
     hasRestoredAppliedSearchRef.current = true;
     setSearchErrorMessage(null);
 
-    void (async () => {
-      try {
-        const payload = buildCollegeFilterSearchRequest({
-          finalPathId: appliedFinalPathId,
-          score: appliedScore,
-          filters: appliedFilters,
-          pageByBand: appliedPageByBand,
-        });
+    const payload = buildCollegeFilterSearchRequest({
+      finalPathId: appliedFinalPathId,
+      score: appliedScore,
+      filters: appliedFilters,
+      pageByBand: appliedPageByBand,
+    });
 
-        const result = await searchMutation.mutateAsync(payload);
-
+    void executeGuardedSearch({
+      payload,
+      onSuccess: (result) => {
         setSearchResponse(result.response);
         setPageByBand(appliedPageByBand);
         setActiveVisibleBand(appliedActiveBand ?? result.resolvedDefaultBand);
         markSearchExecuted();
         setResultsAreStale(false);
-      } catch (error) {
-        setSearchErrorMessage(normalizeApiError(error));
-      }
-    })();
+      },
+      onError: (message) => {
+        setSearchErrorMessage(message);
+      },
+    });
   }, [
     appliedSearchState,
+    executeGuardedSearch,
     markSearchExecuted,
-    searchMutation,
     selection.finalPathId,
     setActiveVisibleBand,
     setResultsAreStale,
   ]);
 
   const urlStateForSync = useMemo<CollegeFilterUrlState>(() => {
-    if (hasExecutedSearch && appliedSearchState) {
-      return appliedSearchState;
-    }
-
-    return {
+    const liveDraftState: CollegeFilterUrlState = {
       rootPathId: selectedRootPathId,
       educationType: selectedEducationType,
       finalPathId: selection.finalPathId ?? selectedFinalPathId,
@@ -314,11 +411,22 @@ export function CollegeFilterPageShell() {
       pageByBand: COLLEGE_FILTER_DEFAULT_BAND_PAGES,
       applied: false,
     };
+
+    if (!isCurrentDraftApplied || !appliedSearchState) {
+      return liveDraftState;
+    }
+
+    return {
+      ...liveDraftState,
+      activeBand: appliedSearchState.activeBand,
+      pageByBand: appliedSearchState.pageByBand,
+      applied: true,
+    };
   }, [
     appliedSearchState,
     draftFilters,
     draftScore,
-    hasExecutedSearch,
+    isCurrentDraftApplied,
     selectedEducationType,
     selectedFinalPathId,
     selectedRootPathId,
@@ -339,55 +447,59 @@ export function CollegeFilterPageShell() {
     router.replace(nextUrl, { scroll: false });
   }, [currentSearchParamsString, encodedUrl, pathname, router]);
 
+
   const handleSearch = useCallback(async () => {
     if (!selection.finalPathId || !formSnapshot?.isSearchReady) return;
 
     setSearchErrorMessage(null);
 
-    try {
-      const freshPageByBand = COLLEGE_FILTER_DEFAULT_BAND_PAGES;
-      setPageByBand(freshPageByBand);
+    const freshPageByBand = COLLEGE_FILTER_DEFAULT_BAND_PAGES;
+    setPageByBand(freshPageByBand);
 
-      const payload = buildCollegeFilterSearchRequest({
-        finalPathId: selection.finalPathId,
-        score: formSnapshot.score,
-        filters: formSnapshot.filters,
-        pageByBand: freshPageByBand,
-      });
+    const payload = buildCollegeFilterSearchRequest({
+      finalPathId: selection.finalPathId,
+      score: formSnapshot.score,
+      filters: formSnapshot.filters,
+      pageByBand: freshPageByBand,
+    });
 
-      const result = await searchMutation.mutateAsync(payload);
-      const nextActiveBand = result.resolvedDefaultBand;
+    void executeGuardedSearch({
+      payload,
+      onSuccess: (result) => {
+        const nextActiveBand = result.resolvedDefaultBand;
 
-      const nextAppliedState: CollegeFilterUrlState = {
-        rootPathId: selectedRootPathId,
-        educationType: selectedEducationType,
-        finalPathId: selection.finalPathId,
-        score: formSnapshot.score,
-        filters: formSnapshot.filters,
-        activeBand: nextActiveBand,
-        pageByBand: freshPageByBand,
-        applied: true,
-      };
-
-      setSearchResponse(result.response);
-      setActiveVisibleBand(nextActiveBand);
-      setAppliedSearchState(nextAppliedState);
-      setLastExecutedSearchFingerprint(
-        JSON.stringify({
+        const nextAppliedState: CollegeFilterUrlState = {
+          rootPathId: selectedRootPathId,
+          educationType: selectedEducationType,
           finalPathId: selection.finalPathId,
           score: formSnapshot.score,
           filters: formSnapshot.filters,
-        })
-      );
-      markSearchExecuted();
-      setResultsAreStale(false);
-    } catch (error) {
-      setSearchErrorMessage(normalizeApiError(error));
-    }
+          activeBand: nextActiveBand,
+          pageByBand: freshPageByBand,
+          applied: true,
+        };
+
+        setSearchResponse(result.response);
+        setActiveVisibleBand(nextActiveBand);
+        setAppliedSearchState(nextAppliedState);
+        setLastExecutedSearchFingerprint(
+          JSON.stringify({
+            finalPathId: selection.finalPathId,
+            score: formSnapshot.score,
+            filters: formSnapshot.filters,
+          })
+        );
+        markSearchExecuted();
+        setResultsAreStale(false);
+      },
+      onError: (message) => {
+        setSearchErrorMessage(message);
+      },
+    });
   }, [
+    executeGuardedSearch,
     formSnapshot,
     markSearchExecuted,
-    searchMutation,
     selectedEducationType,
     selectedRootPathId,
     selection.finalPathId,
@@ -414,46 +526,48 @@ export function CollegeFilterPageShell() {
 
       setSearchErrorMessage(null);
 
-      try {
-        const payload = buildCollegeFilterSearchRequest({
-          finalPathId: appliedSearchState.finalPathId,
-          score: appliedSearchState.score,
-          filters: appliedSearchState.filters,
-          pageByBand: nextPageByBand,
-        });
+      const payload = buildCollegeFilterSearchRequest({
+        finalPathId: appliedSearchState.finalPathId,
+        score: appliedSearchState.score,
+        filters: appliedSearchState.filters,
+        pageByBand: nextPageByBand,
+      });
 
-        const result = await searchMutation.mutateAsync(payload);
+      void executeGuardedSearch({
+        payload,
+        onSuccess: (result) => {
+          const nextAppliedState: CollegeFilterUrlState = {
+            ...appliedSearchState,
+            activeBand: band,
+            pageByBand: nextPageByBand,
+            applied: true,
+          };
 
-        const nextAppliedState: CollegeFilterUrlState = {
-          ...appliedSearchState,
-          activeBand: band,
-          pageByBand: nextPageByBand,
-          applied: true,
-        };
-
-        setPageByBand(nextPageByBand);
-        setSearchResponse(result.response);
-        setActiveVisibleBand(band);
-        setAppliedSearchState(nextAppliedState);
-        setLastExecutedSearchFingerprint(
-          JSON.stringify({
-            finalPathId: appliedSearchState.finalPathId,
-            score: appliedSearchState.score,
-            filters: appliedSearchState.filters,
-          })
-        );
-        markSearchExecuted();
-        setResultsAreStale(false);
-      } catch (error) {
-        setSearchErrorMessage(normalizeApiError(error));
-      }
+          setPageByBand(nextPageByBand);
+          setSearchResponse(result.response);
+          setActiveVisibleBand(band);
+          setAppliedSearchState(nextAppliedState);
+          setLastExecutedSearchFingerprint(
+            JSON.stringify({
+              finalPathId: appliedSearchState.finalPathId,
+              score: appliedSearchState.score,
+              filters: appliedSearchState.filters,
+            })
+          );
+          markSearchExecuted();
+          setResultsAreStale(false);
+        },
+        onError: (message) => {
+          setSearchErrorMessage(message);
+        },
+      });
     },
     [
       appliedSearchState,
+      executeGuardedSearch,
       markSearchExecuted,
       pageByBand,
       resultsAreStale,
-      searchMutation,
       searchResponse,
       setActiveVisibleBand,
       setResultsAreStale,
@@ -546,9 +660,7 @@ export function CollegeFilterPageShell() {
           <div className="min-h-0 px-4 py-3 xl:flex-1 xl:overflow-y-auto xl:cf-panel-scroll">
             {!isSelectionPanelCollapsed ? (
               <>
-                {isPathCatalogLoading ? (
-                  <div className="text-sm text-muted-foreground">Loading exam paths...</div>
-                ) : null}
+                {isPathCatalogLoading ? <SelectionPanelSkeleton /> : null}
 
                 {isPathCatalogError ? (
                   <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
@@ -589,7 +701,11 @@ export function CollegeFilterPageShell() {
                 {selection.hasResolvedFinalPath ? (
                   <div className="mt-4">
                     {isMetadataLoading ? (
-                      <FilterPanelSkeleton />
+                      <DynamicFilterPanelSkeleton
+                        controlCount={5}
+                        showLocationCluster={true}
+                        showFooterHint={true}
+                      />
                     ) : metadataData?.raw ? (
                       <DynamicFilterPanel
                         key={selection.finalPathId ?? "college-filter-empty-path"}

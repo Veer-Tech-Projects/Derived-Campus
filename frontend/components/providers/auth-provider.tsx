@@ -1,11 +1,17 @@
 "use client";
 
-import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from "react"; // <--- Added useCallback
-import { apiClient, setAccessToken } from "@/lib/api-client"; // Updated import path
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useRef,
+  useCallback,
+} from "react";
+import { apiClient, setAccessToken } from "@/lib/api-client";
 import { useRouter, usePathname } from "next/navigation";
 import { toast } from "sonner";
 
-// Matches backend RBAC Enum
 export type AdminRole = "SUPERADMIN" | "EDITOR" | "VIEWER";
 
 interface AdminUser {
@@ -34,39 +40,40 @@ const ROLE_HIERARCHY: Record<AdminRole, number> = {
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<AdminUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+
   const router = useRouter();
   const pathname = usePathname();
-  
-  // Ref to prevent multiple concurrent checks
+
   const isCheckInProgress = useRef(false);
 
-  // 1. Initial Session Hydration
+  const isAdminRoute = pathname?.startsWith("/admin") ?? false;
+
   useEffect(() => {
     const initAuth = async () => {
+      if (!isAdminRoute) {
+        setUser(null);
+        setIsLoading(false);
+        return;
+      }
+
       try {
-        // Attempt Silent Refresh
         const refreshRes = await apiClient.post("/auth/refresh");
         setAccessToken(refreshRes.data.access_token);
-        
-        // Fetch Profile
+
         const meRes = await apiClient.get("/auth/me");
         setUser(meRes.data);
-      } catch (e) {
-        // Session invalid or expired -> Normal behavior for first visit
+      } catch {
         setUser(null);
       } finally {
         setIsLoading(false);
       }
     };
 
-    initAuth();
-  }, []);
+    void initAuth();
+  }, [isAdminRoute]);
 
-  // 2. Heartbeat: Check Session Validity Every 30 Seconds
-  // This ensures that if the backend invalidates the session (e.g. password change),
-  // the UI catches up without requiring a page refresh.
   useEffect(() => {
-    if (!user) return; 
+    if (!isAdminRoute || !user) return;
 
     const heartbeat = setInterval(async () => {
       if (isCheckInProgress.current) return;
@@ -74,48 +81,41 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
       try {
         await apiClient.get("/auth/me");
-      } catch (e) {
-        console.log("Heartbeat failed - Session invalid");
-        // Interceptor handles the redirect
+      } catch {
+        // interceptor handles route-aware failure behavior
       } finally {
         isCheckInProgress.current = false;
       }
-    }, 30000); 
+    }, 30000);
 
     return () => clearInterval(heartbeat);
-  }, [user]);
+  }, [isAdminRoute, user]);
 
-  // 3. Route Protection (Client Side)
   useEffect(() => {
+    if (!isAdminRoute) return;
     if (pathname === "/admin/login") return;
 
     if (!isLoading && !user && pathname.startsWith("/admin")) {
       router.push("/admin/login");
     }
-  }, [user, isLoading, pathname, router]);
+  }, [user, isLoading, pathname, router, isAdminRoute]);
 
   const login = async (username: string, password: string) => {
-    try {
-      const res = await apiClient.post("/auth/login", { username, password });
-      setAccessToken(res.data.access_token);
-      
-      const me = await apiClient.get("/auth/me");
-      setUser(me.data);
-      
-      toast.success("Welcome back, Commander");
-      router.push("/admin");
-    } catch (e: any) {
-      const msg = e.response?.data?.detail || "Login failed";
-      // Pass error up so the Login Page can handle specific codes (like Lockout)
-      throw e; 
-    }
+    const res = await apiClient.post("/auth/login", { username, password });
+    setAccessToken(res.data.access_token);
+
+    const me = await apiClient.get("/auth/me");
+    setUser(me.data);
+
+    toast.success("Welcome back, Commander");
+    router.push("/admin");
   };
 
   const logout = async () => {
     try {
       await apiClient.post("/auth/logout");
-    } catch (e) {
-      // Ignore errors
+    } catch {
+      // ignore
     } finally {
       setAccessToken(null);
       setUser(null);
@@ -124,16 +124,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
-  // [FIX] Memoized RBAC Helper
-  // Prevents RoleGuard from re-running logic unnecessarily
-  const hasRole = useCallback((requiredRole: AdminRole) => {
-    if (!user) return false;
-    return ROLE_HIERARCHY[user.role] >= ROLE_HIERARCHY[requiredRole];
-  }, [user]);
+  const hasRole = useCallback(
+    (requiredRole: AdminRole) => {
+      if (!user) return false;
+      return ROLE_HIERARCHY[user.role] >= ROLE_HIERARCHY[requiredRole];
+    },
+    [user],
+  );
 
   return (
     <AuthContext.Provider value={{ user, isLoading, login, logout, hasRole }}>
-      {!isLoading && children}
+      {children}
     </AuthContext.Provider>
   );
 };
