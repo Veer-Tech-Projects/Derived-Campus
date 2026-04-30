@@ -22,6 +22,13 @@ from app.domains.student_portal.college_filter_tool.routers import college_filte
 from app.domains.student_auth.routers import student_auth_router
 from app.domains.student_portal.student_account.routers import student_account_router
 
+from app.domains.student_portal.student_billing.routers.student_billing_router import (
+    router as student_billing_router,
+)
+from app.domains.student_portal.student_billing.routers.student_billing_webhook_router import (
+    router as student_billing_webhook_router,
+)
+
 app = FastAPI(title=settings.PROJECT_NAME)
 
 # --- ENTERPRISE CORS POLICY ---
@@ -53,6 +60,8 @@ app.include_router(audit_router.router)
 app.include_router(college_filter_router.router)
 app.include_router(student_auth_router.router)
 app.include_router(student_account_router.router)
+app.include_router(student_billing_router)
+app.include_router(student_billing_webhook_router)
 
 @app.get("/")
 async def root():

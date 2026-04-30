@@ -399,3 +399,13 @@ class CollegeFilterSearchResponse(BaseModel):
     generated_at: datetime
 
     model_config = ConfigDict(extra="forbid")
+
+
+class CollegeFilterInsufficientCreditsResponse(BaseModel):
+    error_code: str
+    message: str
+    available_credits: int
+    required_credits: int
+    billing_redirect_path: str
+
+    model_config = ConfigDict(extra="forbid")

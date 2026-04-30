@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { normalizeApiError } from "../../api/student-public-client";
+import { CollegeFilterInsufficientCreditsError } from "../../api/college-filter.api";
 import {
   buildCollegeFilterSearchRequest,
   COLLEGE_FILTER_DEFAULT_BAND_PAGES,
@@ -80,7 +81,20 @@ function buildStableRequestKey(payload: CollegeFilterSearchRequest): string {
   });
 }
 
-export function CollegeFilterPageShell() {
+type CollegeFilterPageShellProps = {
+  accessToken: string | null;
+};
+
+type InsufficientCreditsUiState = {
+  message: string;
+  availableCredits: number;
+  requiredCredits: number;
+  billingRedirectPath: string;
+};
+
+export function CollegeFilterPageShell({
+  accessToken,
+}: CollegeFilterPageShellProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -114,6 +128,8 @@ export function CollegeFilterPageShell() {
   const [searchResponse, setSearchResponse] =
     useState<CollegeFilterSearchResponse | null>(null);
   const [searchErrorMessage, setSearchErrorMessage] = useState<string | null>(null);
+  const [insufficientCreditsState, setInsufficientCreditsState] =
+    useState<InsufficientCreditsUiState | null>(null);
   const [lastExecutedSearchFingerprint, setLastExecutedSearchFingerprint] =
     useState<string | null>(null);
   const [pageByBand, setPageByBand] = useState<BandPageRequest>(
@@ -142,7 +158,7 @@ export function CollegeFilterPageShell() {
   const setResultsAreStale = useCollegeFilterUiStore((state) => state.setResultsAreStale);
   const setActiveVisibleBand = useCollegeFilterUiStore((state) => state.setActiveVisibleBand);
 
-  const searchMutation = useCollegeFilterSearchQuery();
+  const searchMutation = useCollegeFilterSearchQuery(accessToken);
 
   const resetSearchWorkspaceState = useCallback(() => {
     setDraftScore("");
@@ -150,6 +166,7 @@ export function CollegeFilterPageShell() {
     setFormSnapshot(null);
     setSearchResponse(null);
     setSearchErrorMessage(null);
+    setInsufficientCreditsState(null);
     setLastExecutedSearchFingerprint(null);
     setAppliedSearchState(null);
     setPageByBand(COLLEGE_FILTER_DEFAULT_BAND_PAGES);
@@ -210,9 +227,12 @@ export function CollegeFilterPageShell() {
     isError: isMetadataError,
   } = useCollegeFilterMetadataQuery(selection.finalPathId);
 
+  const hasRenderableResultsWorkspace =
+    searchResponse !== null || insufficientCreditsState !== null;
+
   const { shouldShowFollowSteps } = useFollowStepsVisibility({
     hasExecutedSearch,
-    hasRenderableResults: false,
+    hasRenderableResults: hasRenderableResultsWorkspace,
   });
 
   const handleFormStateChange = useCallback(
@@ -320,7 +340,7 @@ export function CollegeFilterPageShell() {
     }: {
       payload: CollegeFilterSearchRequest;
       onSuccess: (result: Awaited<ReturnType<typeof searchMutation.mutateAsync>>, requestId: number) => void;
-      onError: (message: string, requestId: number) => void;
+      onError: (error: unknown, requestId: number) => void;
     }) => {
       const requestKey = buildStableRequestKey(payload);
 
@@ -345,7 +365,7 @@ export function CollegeFilterPageShell() {
           return;
         }
 
-        onError(normalizeApiError(error), requestId);
+        onError(error, requestId);
       } finally {
         if (activeRequestKeyRef.current === requestKey) {
           activeRequestKeyRef.current = null;
@@ -370,6 +390,7 @@ export function CollegeFilterPageShell() {
 
     hasRestoredAppliedSearchRef.current = true;
     setSearchErrorMessage(null);
+    setInsufficientCreditsState(null);
 
     const payload = buildCollegeFilterSearchRequest({
       finalPathId: appliedFinalPathId,
@@ -387,8 +408,22 @@ export function CollegeFilterPageShell() {
         markSearchExecuted();
         setResultsAreStale(false);
       },
-      onError: (message) => {
-        setSearchErrorMessage(message);
+      onError: (error) => {
+        if (error instanceof CollegeFilterInsufficientCreditsError) {
+          setSearchResponse(null);
+          setSearchErrorMessage(null);
+          setInsufficientCreditsState({
+            message: error.message,
+            availableCredits: error.availableCredits,
+            requiredCredits: error.requiredCredits,
+            billingRedirectPath: error.billingRedirectPath,
+          });
+          setActiveVisibleBand(null);
+          return;
+        }
+
+        setInsufficientCreditsState(null);
+        setSearchErrorMessage(normalizeApiError(error));
       },
     });
   }, [
@@ -452,6 +487,7 @@ export function CollegeFilterPageShell() {
     if (!selection.finalPathId || !formSnapshot?.isSearchReady) return;
 
     setSearchErrorMessage(null);
+    setInsufficientCreditsState(null);
 
     const freshPageByBand = COLLEGE_FILTER_DEFAULT_BAND_PAGES;
     setPageByBand(freshPageByBand);
@@ -466,6 +502,8 @@ export function CollegeFilterPageShell() {
     void executeGuardedSearch({
       payload,
       onSuccess: (result) => {
+        setInsufficientCreditsState(null);
+
         const nextActiveBand = result.resolvedDefaultBand;
 
         const nextAppliedState: CollegeFilterUrlState = {
@@ -492,8 +530,22 @@ export function CollegeFilterPageShell() {
         markSearchExecuted();
         setResultsAreStale(false);
       },
-      onError: (message) => {
-        setSearchErrorMessage(message);
+      onError: (error) => {
+        if (error instanceof CollegeFilterInsufficientCreditsError) {
+          setSearchResponse(null);
+          setSearchErrorMessage(null);
+          setInsufficientCreditsState({
+            message: error.message,
+            availableCredits: error.availableCredits,
+            requiredCredits: error.requiredCredits,
+            billingRedirectPath: error.billingRedirectPath,
+          });
+          setActiveVisibleBand(null);
+          return;
+        }
+
+        setInsufficientCreditsState(null);
+        setSearchErrorMessage(normalizeApiError(error));
       },
     });
   }, [
@@ -525,6 +577,7 @@ export function CollegeFilterPageShell() {
       };
 
       setSearchErrorMessage(null);
+      setInsufficientCreditsState(null);
 
       const payload = buildCollegeFilterSearchRequest({
         finalPathId: appliedSearchState.finalPathId,
@@ -536,6 +589,8 @@ export function CollegeFilterPageShell() {
       void executeGuardedSearch({
         payload,
         onSuccess: (result) => {
+          setInsufficientCreditsState(null);
+
           const nextAppliedState: CollegeFilterUrlState = {
             ...appliedSearchState,
             activeBand: band,
@@ -557,8 +612,22 @@ export function CollegeFilterPageShell() {
           markSearchExecuted();
           setResultsAreStale(false);
         },
-        onError: (message) => {
-          setSearchErrorMessage(message);
+        onError: (error) => {
+          if (error instanceof CollegeFilterInsufficientCreditsError) {
+            setSearchResponse(null);
+            setSearchErrorMessage(null);
+            setInsufficientCreditsState({
+              message: error.message,
+              availableCredits: error.availableCredits,
+              requiredCredits: error.requiredCredits,
+              billingRedirectPath: error.billingRedirectPath,
+            });
+            setActiveVisibleBand(null);
+            return;
+          }
+
+          setInsufficientCreditsState(null);
+          setSearchErrorMessage(normalizeApiError(error));
         },
       });
     },
@@ -782,8 +851,14 @@ export function CollegeFilterPageShell() {
                 activeVisibleBand={activeVisibleBand}
                 resultsAreStale={resultsAreStale}
                 searchErrorMessage={searchErrorMessage}
+                insufficientCreditsState={insufficientCreditsState}
                 isRefreshingResults={searchMutation.isPending}
                 isSelectionPanelCollapsed={isSelectionPanelCollapsed}
+                onOpenBilling={() => {
+                  router.push(
+                    insufficientCreditsState?.billingRedirectPath ?? "/student-billing/plans"
+                  );
+                }}
                 onChangeBand={(band) => {
                   setActiveVisibleBand(band);
                   if (appliedSearchState?.applied) {

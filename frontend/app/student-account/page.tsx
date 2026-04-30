@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { Area } from "react-easy-crop";
 
 import { getStudentOnboardingState } from "@/features/student-auth/api/student-auth-api";
@@ -29,17 +29,22 @@ import type { StudentOnboardingStateResponse } from "@/features/student-auth/typ
 import { useStudentAccountProfileForm } from "@/features/student-account/hooks/use-student-account-profile-form";
 import { useStudentAccountExamPreferencesForm } from "@/features/student-account/hooks/use-student-account-exam-preferences-form";
 import { useStudentAccountPhoneForm } from "@/features/student-account/hooks/use-student-account-phone-form";
+import { useStudentBillingOverview } from "@/features/student-billing/hooks/use-student-billing-overview";
+import { StudentAccountBillingLauncher } from "@/features/student-billing/components/student-account-billing-launcher";
+import type { StudentAvailableCreditsBadgeViewModel } from "@/features/student-billing/types/student-billing-view-models";
 
-type TabState = "profile" | "account" | "preferences";
+type TabState = "profile" | "account" | "preferences" | "billing";
 
 const ACCOUNT_TABS: Array<{ id: TabState; label: string }> = [
   { id: "profile", label: "Profile" },
   { id: "account", label: "Account" },
   { id: "preferences", label: "Preferences" },
+  { id: "billing", label: "Billing" },
 ];
 
 export default function StudentAccountPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const {
     status,
     profile,
@@ -50,7 +55,33 @@ export default function StudentAccountPage() {
   } = useStudentAuth();
 
   const [loggingOut, setLoggingOut] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabState>("profile");
+  const requestedTab = searchParams.get("tab");
+  const initialTab: TabState =
+    requestedTab === "billing" ? "billing" : "profile";
+
+  const [activeTab, setActiveTab] = useState<TabState>(initialTab);
+
+  useEffect(() => {
+    if (requestedTab === "billing") {
+      setActiveTab("billing");
+      return;
+    }
+
+    if (requestedTab === "profile") {
+      setActiveTab("profile");
+      return;
+    }
+
+    if (requestedTab === "account") {
+      setActiveTab("account");
+      return;
+    }
+
+    if (requestedTab === "preferences") {
+      setActiveTab("preferences");
+    }
+  }, [requestedTab]);
+
   const [identityState, setIdentityState] = useState<{
     loading: boolean;
     providerEmail: string | null;
@@ -75,6 +106,11 @@ export default function StudentAccountPage() {
     accessToken,
     profile,
     refreshSession,
+  });
+
+  const billingOverviewQuery = useStudentBillingOverview({
+    accessToken,
+    enabled: status === "authenticated_completed" && Boolean(accessToken),
   });
 
   useEffect(() => {
@@ -179,6 +215,18 @@ export default function StudentAccountPage() {
   const contact = useMemo(() => {
     return profile ? buildStudentContactViewModel(profile) : null;
   }, [profile]);
+
+  const billingGatewayBadgeViewModel =
+    useMemo<StudentAvailableCreditsBadgeViewModel | null>(() => {
+      if (!billingOverviewQuery.viewModel) {
+        return null;
+      }
+
+      return {
+        availableCredits: billingOverviewQuery.viewModel.wallet.available_credits,
+        lowCreditState: billingOverviewQuery.viewModel.lowCreditState,
+      };
+    }, [billingOverviewQuery.viewModel]);
 
   if (status === "unknown" || (status === "refreshing" && !profile)) {
     return (
@@ -308,6 +356,27 @@ export default function StudentAccountPage() {
                 onSaveChanges={examPreferencesForm.saveChanges}
               />
             ) : null}
+
+            {activeTab === "billing" ? (
+              <StudentAccountBillingLauncher
+                availableCreditsBadgeViewModel={billingGatewayBadgeViewModel}
+                availableCredits={
+                  billingOverviewQuery.viewModel?.wallet.available_credits ?? null
+                }
+                isLoading={billingOverviewQuery.isLoading}
+                errorMessage={
+                  billingOverviewQuery.isError
+                    ? billingOverviewQuery.error?.message ??
+                      "Billing data could not be loaded right now."
+                    : null
+                }
+                onOpenOverview={() => router.push("/student-billing/overview")}
+                onOpenSubscriptions={() => router.push("/student-billing/plans")}
+                onOpenWallet={() => router.push("/student-billing/wallet")}
+                onOpenHistory={() => router.push("/student-billing/history")}
+              />
+            ) : null}
+
           </div>
         </div>
       </StudentAccountShell>

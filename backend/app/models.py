@@ -1515,6 +1515,27 @@ class StudentUser(Base):
         back_populates="student_user",
         cascade="all, delete-orphan",
     )
+    credit_wallet = relationship(
+        "StudentCreditWallet",
+        back_populates="student_user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    payment_orders = relationship(
+        "PaymentOrder",
+        back_populates="student_user",
+        cascade="all, delete-orphan",
+    )
+    credit_ledger_entries = relationship(
+        "StudentCreditLedger",
+        back_populates="student_user",
+        cascade="all, delete-orphan",
+    )
+    search_entitlements = relationship(
+        "StudentSearchEntitlement",
+        back_populates="student_user",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("idx_student_user_account_status", "account_status"),
@@ -1699,4 +1720,437 @@ class StudentAuthAuditLog(Base):
     __table_args__ = (
         Index("idx_student_auth_audit_user_created", "student_user_id", "created_at"),
         Index("idx_student_auth_audit_provider_created", "provider", "created_at"),
+    )
+
+
+
+# --- STUDENT BILLING ENUMS ---
+
+class BillingGatewayProvider(str, enum.Enum):
+    RAZORPAY = "RAZORPAY"
+
+
+class CreditLedgerEntryType(str, enum.Enum):
+    PURCHASE_CREDIT_GRANTED = "PURCHASE_CREDIT_GRANTED"
+    SEARCH_CREDIT_CONSUMED = "SEARCH_CREDIT_CONSUMED"
+    USAGE_DEBIT = "USAGE_DEBIT"
+    ADMIN_ADJUSTMENT_CREDIT = "ADMIN_ADJUSTMENT_CREDIT"
+    ADMIN_ADJUSTMENT_DEBIT = "ADMIN_ADJUSTMENT_DEBIT"
+    REFUND_REVERSAL_DEBIT = "REFUND_REVERSAL_DEBIT"
+
+
+class PaymentOrderStatus(str, enum.Enum):
+    CREATED = "CREATED"
+    GATEWAY_ORDER_CREATED = "GATEWAY_ORDER_CREATED"
+    CHECKOUT_INITIATED = "CHECKOUT_INITIATED"
+    SETTLED = "SETTLED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+
+
+class PaymentTransactionStatus(str, enum.Enum):
+    RECEIVED = "RECEIVED"
+    PROCESSED = "PROCESSED"
+    FAILED_PROCESSING = "FAILED_PROCESSING"
+
+
+class PaymentWebhookProcessingStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    PROCESSED = "PROCESSED"
+    FAILED = "FAILED"
+
+
+# --- STUDENT BILLING ENUM SQLALCHEMY TYPES ---
+
+billing_gateway_provider_sqenum = SqEnum(
+    BillingGatewayProvider,
+    name="billing_gateway_provider_enum",
+)
+
+credit_ledger_entry_type_sqenum = SqEnum(
+    CreditLedgerEntryType,
+    name="credit_ledger_entry_type_enum",
+)
+
+payment_order_status_sqenum = SqEnum(
+    PaymentOrderStatus,
+    name="payment_order_status_enum",
+)
+
+payment_transaction_status_sqenum = SqEnum(
+    PaymentTransactionStatus,
+    name="payment_transaction_status_enum",
+)
+
+payment_webhook_processing_status_sqenum = SqEnum(
+    PaymentWebhookProcessingStatus,
+    name="payment_webhook_processing_status_enum",
+)
+
+
+# --- STUDENT BILLING: CREDIT PACKAGE CATALOG ---
+
+class CreditPackage(Base):
+    __tablename__ = "credit_packages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    package_code = Column(String(64), nullable=False)
+    display_name = Column(String(128), nullable=False)
+    description = Column(Text, nullable=True)
+
+    credit_amount = Column(Integer, nullable=False)
+    price_minor = Column(BigInteger, nullable=False)
+    currency_code = Column(String(3), nullable=False)
+
+    active = Column(Boolean, nullable=False, server_default=text("true"))
+    display_order = Column(Integer, nullable=False, server_default=text("0"))
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    payment_orders = relationship(
+        "PaymentOrder",
+        back_populates="credit_package",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("package_code", name="uq_credit_package_code"),
+        CheckConstraint("credit_amount > 0", name="ck_credit_package_credit_amount_positive"),
+        CheckConstraint("price_minor > 0", name="ck_credit_package_price_minor_positive"),
+        CheckConstraint("char_length(currency_code) = 3", name="ck_credit_package_currency_code_len"),
+        Index("idx_credit_package_active_display", "active", "display_order"),
+    )
+
+
+# --- STUDENT BILLING: CREDIT WALLET SNAPSHOT ---
+
+class StudentCreditWallet(Base):
+    __tablename__ = "student_credit_wallets"
+
+    student_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("student_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    available_credits = Column(Integer, nullable=False, server_default=text("0"))
+    lifetime_credits_purchased = Column(Integer, nullable=False, server_default=text("0"))
+    lifetime_credits_consumed = Column(Integer, nullable=False, server_default=text("0"))
+
+    version = Column(BigInteger, nullable=False, server_default=text("0"))
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    student_user = relationship(
+        "StudentUser",
+        back_populates="credit_wallet",
+    )
+
+    __table_args__ = (
+        CheckConstraint("available_credits >= 0", name="ck_credit_wallet_available_non_negative"),
+        CheckConstraint(
+            "lifetime_credits_purchased >= 0",
+            name="ck_credit_wallet_lifetime_purchased_non_negative",
+        ),
+        CheckConstraint(
+            "lifetime_credits_consumed >= 0",
+            name="ck_credit_wallet_lifetime_consumed_non_negative",
+        ),
+        CheckConstraint("version >= 0", name="ck_credit_wallet_version_non_negative"),
+    )
+
+
+# --- STUDENT BILLING: IMMUTABLE CREDIT LEDGER ---
+
+class StudentCreditLedger(Base):
+    __tablename__ = "student_credit_ledger"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    student_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("student_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    entry_type = Column(
+        credit_ledger_entry_type_sqenum,
+        nullable=False,
+    )
+
+    credit_delta = Column(Integer, nullable=False)
+    balance_after = Column(Integer, nullable=False)
+
+    reference_type = Column(String(64), nullable=False)
+    reference_id = Column(UUID(as_uuid=True), nullable=False)
+
+    idempotency_key = Column(String(128), nullable=False)
+    metadata_json = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+    created_by = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    student_user = relationship(
+        "StudentUser",
+        back_populates="credit_ledger_entries",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_credit_ledger_idempotency_key"),
+        CheckConstraint("balance_after >= 0", name="ck_credit_ledger_balance_after_non_negative"),
+        Index("idx_credit_ledger_student_created", "student_user_id", "created_at"),
+        Index("idx_credit_ledger_reference", "reference_type", "reference_id"),
+    )
+
+
+class StudentSearchEntitlement(Base):
+    __tablename__ = "student_search_entitlements"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    student_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("student_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    path_id = Column(UUID(as_uuid=True), nullable=False)
+    search_fingerprint = Column(String(64), nullable=False)
+
+    request_snapshot_json = Column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
+
+    entitlement_expires_at = Column(DateTime(timezone=True), nullable=False)
+    last_accessed_at = Column(DateTime(timezone=True), nullable=True)
+
+    consumption_ledger_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("student_credit_ledger.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    student_user = relationship(
+        "StudentUser",
+        back_populates="search_entitlements",
+    )
+
+    consumption_ledger = relationship(
+        "StudentCreditLedger",
+        foreign_keys=[consumption_ledger_id],
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "student_user_id",
+            "search_fingerprint",
+            name="uq_student_search_entitlement_student_fingerprint",
+        ),
+        Index(
+            "idx_student_search_entitlement_student_expiry",
+            "student_user_id",
+            "entitlement_expires_at",
+        ),
+        Index(
+            "idx_student_search_entitlement_fingerprint",
+            "search_fingerprint",
+        ),
+    )
+
+
+# --- STUDENT BILLING: PAYMENT ORDERS ---
+
+class PaymentOrder(Base):
+    __tablename__ = "payment_orders"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    student_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("student_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    package_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("credit_packages.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+
+    merchant_order_ref = Column(String(64), nullable=False)
+    gateway_provider = Column(
+        billing_gateway_provider_sqenum,
+        nullable=False,
+    )
+    gateway_order_id = Column(String(128), nullable=True)
+
+    client_idempotency_key = Column(String(128), nullable=False)
+
+    amount_minor = Column(BigInteger, nullable=False)
+    currency_code = Column(String(3), nullable=False)
+
+    status = Column(
+        payment_order_status_sqenum,
+        nullable=False,
+        server_default=text("'CREATED'"),
+    )
+
+    gateway_receipt = Column(String(128), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    student_user = relationship(
+        "StudentUser",
+        back_populates="payment_orders",
+    )
+    credit_package = relationship(
+        "CreditPackage",
+        back_populates="payment_orders",
+    )
+    payment_transactions = relationship(
+        "PaymentTransaction",
+        back_populates="payment_order",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("merchant_order_ref", name="uq_payment_order_merchant_ref"),
+        UniqueConstraint("gateway_order_id", name="uq_payment_order_gateway_order_id"),
+        UniqueConstraint(
+            "student_user_id",
+            "client_idempotency_key",
+            name="uq_payment_order_client_idempotency",
+        ),
+        CheckConstraint("amount_minor > 0", name="ck_payment_order_amount_minor_positive"),
+        CheckConstraint("char_length(currency_code) = 3", name="ck_payment_order_currency_code_len"),
+        Index("idx_payment_order_student_created", "student_user_id", "created_at"),
+        Index("idx_payment_order_status_created", "status", "created_at"),
+    )
+
+
+# --- STUDENT BILLING: PAYMENT TRANSACTIONS ---
+
+class PaymentTransaction(Base):
+    __tablename__ = "payment_transactions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    payment_order_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("payment_orders.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    gateway_payment_id = Column(String(128), nullable=False)
+    gateway_signature = Column(Text, nullable=True)
+    gateway_event_type = Column(String(64), nullable=False)
+
+    amount_minor = Column(BigInteger, nullable=False)
+    currency_code = Column(String(3), nullable=False)
+
+    status = Column(
+        payment_transaction_status_sqenum,
+        nullable=False,
+        server_default=text("'RECEIVED'"),
+    )
+
+    raw_gateway_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    payment_order = relationship(
+        "PaymentOrder",
+        back_populates="payment_transactions",
+    )
+
+    __table_args__ = (
+        CheckConstraint("amount_minor > 0", name="ck_payment_tx_amount_minor_positive"),
+        CheckConstraint("char_length(currency_code) = 3", name="ck_payment_tx_currency_code_len"),
+        Index("idx_payment_tx_order_created", "payment_order_id", "created_at"),
+        Index("idx_payment_tx_gateway_payment_id", "gateway_payment_id"),
+        Index("idx_payment_tx_event_created", "gateway_event_type", "created_at"),
+        UniqueConstraint("gateway_payment_id", name="uq_payment_tx_gateway_payment_id"),
+    )
+
+
+# --- STUDENT BILLING: VERIFIED WEBHOOK INBOX ---
+
+class PaymentWebhookEvent(Base):
+    __tablename__ = "payment_webhook_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    gateway_provider = Column(
+        billing_gateway_provider_sqenum,
+        nullable=False,
+    )
+
+    gateway_event_id = Column(String(128), nullable=True)
+    event_type = Column(String(64), nullable=False)
+
+    signature_verified = Column(Boolean, nullable=False)
+
+    payload_json = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    dedup_key = Column(String(128), nullable=False)
+
+    processing_status = Column(
+        payment_webhook_processing_status_sqenum,
+        nullable=False,
+        server_default=text("'PENDING'"),
+    )
+
+    processing_attempts = Column(Integer, nullable=False, server_default=text("0"))
+    last_error = Column(Text, nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "gateway_provider",
+            "gateway_event_id",
+            name="uq_payment_webhook_provider_event_id",
+        ),
+        UniqueConstraint("dedup_key", name="uq_payment_webhook_dedup_key"),
+        CheckConstraint(
+            "processing_attempts >= 0",
+            name="ck_payment_webhook_processing_attempts_non_negative",
+        ),
+        Index("idx_payment_webhook_status_created", "processing_status", "created_at"),
     )

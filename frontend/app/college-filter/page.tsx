@@ -35,7 +35,7 @@ function CollegeFilterGateLoading() {
 
 export default function CollegeFilterPage() {
   const router = useRouter();
-  const { status, initialized } = useStudentAuth();
+  const { status, initialized, accessToken } = useStudentAuth();
 
   useEffect(() => {
     if (!initialized) {
@@ -71,5 +71,5 @@ export default function CollegeFilterPage() {
     return <CollegeFilterGateLoading />;
   }
 
-  return <CollegeFilterPageShell />;
+  return <CollegeFilterPageShell accessToken={accessToken} />;
 }

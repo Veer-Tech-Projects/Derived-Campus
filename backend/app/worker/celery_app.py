@@ -1,6 +1,11 @@
 from celery import Celery
 from celery.schedules import crontab
 from app.config import settings
+from app.domains.student_portal.student_billing.constants import (
+    BILLING_RECONCILIATION_BEAT_MINUTES,
+    BILLING_RECONCILIATION_QUEUE,
+    BILLING_RECONCILIATION_SWEEP_TASK,
+)
 import logging
 
 # Initialize Celery
@@ -26,6 +31,9 @@ celery_app.conf.update(
         "ingestion.tasks.perform_exam_scan": {"queue": "ingestion_queue"},
         "ingestion.tasks.trigger_scheduled_scans": {"queue": "ingestion_queue"},
         
+        # Billing operational jobs -> isolated billing lane
+        BILLING_RECONCILIATION_SWEEP_TASK: {"queue": BILLING_RECONCILIATION_QUEUE},
+
         # --- INFRASTRUCTURE NOTE ---
         # The 'bootstrap_queue' is NOT listed here intentionally.
         # Historical bootstraps use Explicit Routing via .apply_async(queue='bootstrap_queue')
@@ -47,6 +55,10 @@ celery_app.conf.beat_schedule = {
         "task": "ingestion.tasks.trigger_scheduled_scans",
         "schedule": crontab(minute=0, hour="*/6"),
     },
+    "run-billing-reconciliation-every-10-minutes": {
+        "task": BILLING_RECONCILIATION_SWEEP_TASK,
+        "schedule": crontab(minute=f"*/{BILLING_RECONCILIATION_BEAT_MINUTES}"),
+    },
 }
 
 celery_app.autodiscover_tasks([
@@ -54,6 +66,7 @@ celery_app.autodiscover_tasks([
     "ingestion.media_ingestion",
     "ingestion.location_pipeline",
     "app.domains.student_portal.college_filter_tool",
+    "app.domains.student_portal.student_billing.tasks",
 ])
 
 logger = logging.getLogger(__name__)

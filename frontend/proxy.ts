@@ -21,9 +21,13 @@ export function proxy(request: NextRequest) {
   );
 
   const isStudentAccountRoute = matchesPath(pathname, "/student-account");
+  const isStudentBillingRoute = matchesPath(pathname, "/student-billing");
 
   const isProtectedStudentRoute =
-    isOnboardingRoute || isPostLoginRoute || isStudentAccountRoute;
+    isOnboardingRoute ||
+    isPostLoginRoute ||
+    isStudentAccountRoute ||
+    isStudentBillingRoute;
 
   const refreshCookie = request.cookies.get(
     studentAuthRouteConfig.refreshCookieName,

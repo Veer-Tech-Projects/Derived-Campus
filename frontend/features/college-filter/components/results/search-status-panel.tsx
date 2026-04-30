@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { AlertTriangle, Check, Copy, Wallet } from "lucide-react";
 import {
   CollegeBand,
   CollegeCardDTO,
@@ -18,8 +18,15 @@ type SearchStatusPanelProps = {
   activeVisibleBand: CollegeBand | null;
   resultsAreStale: boolean;
   searchErrorMessage: string | null;
+  insufficientCreditsState: {
+    message: string;
+    availableCredits: number;
+    requiredCredits: number;
+    billingRedirectPath: string;
+  } | null;
   isRefreshingResults: boolean;
   isSelectionPanelCollapsed: boolean;
+  onOpenBilling: () => void;
   onChangeBand: (band: CollegeBand) => void;
   onPreviousPage: (band: CollegeBand) => void;
   onNextPage: (band: CollegeBand) => void;
@@ -30,8 +37,10 @@ export function SearchStatusPanel({
   activeVisibleBand,
   resultsAreStale,
   searchErrorMessage,
+  insufficientCreditsState,
   isRefreshingResults,
   isSelectionPanelCollapsed,
+  onOpenBilling,
   onChangeBand,
   onPreviousPage,
   onNextPage,
@@ -117,6 +126,50 @@ export function SearchStatusPanel({
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1800);
   };
+
+  if (insufficientCreditsState) {
+    return (
+      <div className="rounded-2xl border border-amber-300/70 bg-amber-50 p-5 shadow-sm dark:border-amber-500/30 dark:bg-amber-500/10">
+        <div className="flex flex-col gap-4">
+          <div className="flex items-start gap-3">
+            <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-200">
+              <AlertTriangle className="h-5 w-5" />
+            </div>
+
+            <div className="min-w-0 space-y-2">
+              <h2 className="text-sm font-semibold text-amber-900 dark:text-amber-100">
+                Insufficient credits
+              </h2>
+              <p className="text-sm leading-6 text-amber-800 dark:text-amber-100/90">
+                {insufficientCreditsState.message}
+              </p>
+              <p className="text-xs leading-5 text-amber-700 dark:text-amber-200/80">
+                You currently have {insufficientCreditsState.availableCredits} credit
+                {insufficientCreditsState.availableCredits === 1 ? "" : "s"} available.
+                This search requires {insufficientCreditsState.requiredCredits} credit
+                {insufficientCreditsState.requiredCredits === 1 ? "" : "s"}.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={onOpenBilling}
+              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition hover:opacity-90"
+            >
+              <Wallet className="h-4 w-4" />
+              View plans
+            </button>
+
+            <p className="text-xs leading-5 text-amber-700 dark:text-amber-200/80">
+              Buy credits to continue with a new College Filter search.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (searchErrorMessage) {
     return (

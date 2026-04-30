@@ -102,6 +102,26 @@ services:
       - postgres
       - redis
 
+  celery_billing_worker:
+    image: derived_backend_image
+    container_name: derived_billing_worker
+    restart: always
+    working_dir: /src/backend
+    command: celery -A app.worker.celery_app worker -Q billing_queue -l INFO --concurrency=1
+    environment:
+      - PYTHONPATH=/src/backend:/src
+      - POSTGRES_HOST=postgres
+      - REDIS_HOST=redis
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD}@redis:6379/0
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/src/backend
+    depends_on:
+      - postgres
+      - redis
+
   celery_beat:
     image: derived_backend_image
     container_name: derived_beat
